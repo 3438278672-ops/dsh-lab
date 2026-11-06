@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ADB Phone",
+    "description": "Drive an adb-connected Android phone: screenshot, UI tree, tap, swipe, type, keys, app control."
+  }
+}

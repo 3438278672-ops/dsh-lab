@@ -1,0 +1,4 @@
+- insert:
+    - id: adb-phone
+      name: dsh-adb-phone
+      config: {}

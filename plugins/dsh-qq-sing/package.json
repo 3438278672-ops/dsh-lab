@@ -1,0 +1,20 @@
+{
+  "name": "dsh-qq-sing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QQ 点歌翻唱：B 站取源 + RVC 翻唱 + 逐条语音发群（同一时间只唱一首）",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "worker.mjs",
+    "python",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "dsh-self-extend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-extension loop: find, install, and scaffold DSH plugins when a capability gap or repeated multi-step work appears.",
+  "exports": {
+    ".": "./index.js",
+    "./icon.svg": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

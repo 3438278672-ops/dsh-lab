@@ -1,0 +1,4 @@
+- insert:
+    - id: qq-voice
+      name: dsh-qq-voice
+      config: {}

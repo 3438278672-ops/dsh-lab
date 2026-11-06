@@ -1,0 +1,6 @@
+# dsh-qq-sing：QQ 点歌翻唱（RVC）
+# 插件配置项见 index.js 顶部 DEFAULTS；平时不用改，路径都是本机实测值。
+- insert:
+    - id: qq-sing
+      name: dsh-qq-sing
+      config: {}

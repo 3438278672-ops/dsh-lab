@@ -1,0 +1,17 @@
+{
+  "// 说明": "复制成 config.json 再改。默认配置在「有外网」的机器上开箱可用。",
+  "enabled": true,
+  "engines": ["lens", "saucenao", "tracemoe"],
+  "// engines": "可选：saucenao / lens / tracemoe / iqdb / baidu / bing / yandex / google。lens 最准但需要外网",
+  "timeoutMs": 45000,
+  "maxAccounts": 3,
+  "strictConsensus": true,
+  "// strictConsensus": "true = 名字对不上的别人的号不报（少报不错报）；false = 全都报出来自己挑",
+  "proxy": "",
+  "// proxy": "只要浏览器（Lens/谷歌/百度）走代理时填，例如 http://127.0.0.1:10090；空 = 直连。不动系统代理",
+  "browserExe": "",
+  "// browserExe": "空 = 自动找 Edge；也可以填 chrome.exe 全路径",
+  "foundImage": "",
+  "// foundImage": "命中时顺带发的图（比如一张「找到了」的表情包），空 = 不发图",
+  "sendOnMiss": false
+}

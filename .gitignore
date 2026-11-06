@@ -1,0 +1,31 @@
+# 运行态与缓存
+state/
+out/
+cache/
+library/
+log/
+logs/
+workspace/
+browser-profile/
+jobs/
+tmp/
+
+# 凭证与本地配置（绝不入库）
+credential.json
+credential.lock
+bili_credential.json
+config.json
+env.json
+
+# Python
+.venv/
+.venv-asr/
+__pycache__/
+*.pyc
+
+# 杂项
+*.log
+*.bak-*
+*.unlimited-*
+.DS_Store
+Thumbs.db

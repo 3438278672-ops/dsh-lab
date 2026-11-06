@@ -1,0 +1,33 @@
+{
+  "name": "dsh-coser-fish",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "鱼鱼找鸡：用一张图反查 coser 的社媒账号（推特/微博/B站/Instagram/Pixiv），自带 Google Lens / SauceNAO / trace.moe / IQDB / 百度 / 必应 / Yandex / 谷歌 八个识图引擎",
+  "exports": {
+    ".": "./index.js",
+    "./src/fish-find-chicken.js": "./src/fish-find-chicken.js",
+    "./icon.svg": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "README.md",
+    "src/fish-find-chicken.js",
+    "src/safe-fetch.js",
+    "src/web-search.js",
+    "bin/fish.mjs",
+    "adapters/onebot.mjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
