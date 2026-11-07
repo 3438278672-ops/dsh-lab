@@ -26,6 +26,32 @@
 
 ---
 
+## 界面
+
+两个插件会自己画页面。截图都是用假数据跑的，细节在各自的 README 里。
+
+**群聊档案馆**（`qq_archive action=dashboard` 生成的单文件看板）：
+
+<p>
+  <img src="plugins/dsh-qq-archive/docs/dashboard-today.jpg" width="49%" alt="今日总结：每个群一张日报卡片">
+  <img src="plugins/dsh-qq-archive/docs/dashboard-board.jpg" width="49%" alt="探案板：照片是群友，红线是互相 @">
+</p>
+<p>
+  <img src="plugins/dsh-qq-archive/docs/dashboard-people.jpg" width="49%" alt="群友：发言数、人物印象与标签">
+</p>
+
+**灵感账本**（DSH 侧栏里打开的灵感墙）：
+
+<p>
+  <img src="plugins/dsh-idea-log/docs/wall.jpg" width="49%" alt="灵感墙：统计、类型 tab、状态筛选、卡片">
+  <img src="plugins/dsh-idea-log/docs/wall-open.jpg" width="49%" alt="点开卡片看全文，底下一排状态按钮和「开工 →」">
+</p>
+<p>
+  <img src="plugins/dsh-idea-log/docs/wall-filter.jpg" width="49%" alt="按类型筛到「插件点子」">
+</p>
+
+---
+
 ## 五个设计故事
 
 ### 1. 点歌：按「静音」切，而不是按时间切

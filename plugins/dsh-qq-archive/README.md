@@ -113,6 +113,16 @@ dsh plugin install /path/to/dsh-qq-archive
 
 批注和收藏平时在 localStorage，点「导出存档」才会落成文件——那才是永久档。
 
+<p>
+  <img src="docs/dashboard-today.jpg" width="49%" alt="今日总结：每个群一张日报卡片">
+  <img src="docs/dashboard-board.jpg" width="49%" alt="探案板：照片是群友，红线是互相 @">
+</p>
+<p>
+  <img src="docs/dashboard-people.jpg" width="49%" alt="群友：发言数、人物印象与标签">
+</p>
+
+> 截图里是虚构的群、人和句子，用一份造数脚本灌进临时库再导出的，不是任何真实归档。
+
 ### 浏览页
 
 `qq_archive action=export` 会在插件家目录生成 `viewer.html`，双击就能看：
