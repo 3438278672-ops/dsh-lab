@@ -16,6 +16,22 @@ export const START = {
 
 export const KIND_LABEL = { idea: '插件点子', pitfall: '踩坑', improve: '改进点' }
 
+// 「开工」只对还没被认领的条目开放。孵化中 = 已经有一个对话在做它了，
+// 再点只会开出一份重复的对话，所以这一个状态直接锁住开工按钮。
+// 页面（lib/page.mjs）在渲染时把这份规则注入浏览器，状态机和按钮共用同一条。
+export const START_BLOCKED_STATUSES = ['incubating']
+
+export const START_BLOCKED_REASON = '已经在孵化中了——先把它改成「待看」或「搁置」，才能重新开工。'
+
+/**
+ * 这个状态下能不能开工；不能就给出给用户看的原因。
+ * @param {string} status
+ * @returns {string} 空字符串 = 可以开工
+ */
+export function startBlockedReason(status) {
+  return START_BLOCKED_STATUSES.includes(status) ? START_BLOCKED_REASON : ''
+}
+
 // 点「开工」到底是去创造、去更新，还是去修坑
 export const KIND_INTENT = {
   idea: '把这个点子做成插件',
@@ -57,10 +73,11 @@ export function buildStartPrompt(item = {}) {
 }
 
 /**
- * 开工后该落到哪个状态。已经孵化中的返回 null（不写库，省一次 updated_at 抖动），
+ * 开工后该落到哪个状态。已被开工锁住的状态返回 null（不写库，省一次 updated_at 抖动），
  * 其余（待看/已做/搁置/丢弃）一律认领为孵化中 —— 点开工就是「我现在要做它」。
+ * 与 startBlockedReason 共用 START_BLOCKED_STATUSES，两边不会漂。
  * @returns {'incubating'|null}
  */
 export function nextStatusAfterStart(status) {
-  return status === 'incubating' ? null : 'incubating'
+  return startBlockedReason(status) ? null : 'incubating'
 }

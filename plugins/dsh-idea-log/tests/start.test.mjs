@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { START, KIND_INTENT, buildStartPrompt, nextStatusAfterStart } from '../lib/start.mjs'
+import { START, KIND_INTENT, buildStartPrompt, nextStatusAfterStart, startBlockedReason, START_BLOCKED_REASON, START_BLOCKED_STATUSES } from '../lib/start.mjs'
+import { renderPage } from '../lib/page.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -62,6 +63,24 @@ test('开工后状态：已孵化中的不动，其余认领为孵化中', () =>
   assert.equal(nextStatusAfterStart('parked'), 'incubating')
   assert.equal(nextStatusAfterStart('done'), 'incubating')
   assert.equal(nextStatusAfterStart('incubating'), null)
+})
+
+test('只有「孵化中」锁住开工，理由单一来源；状态一改回来就恢复', () => {
+  assert.deepEqual(START_BLOCKED_STATUSES, ['incubating'])
+  assert.equal(startBlockedReason('incubating'), START_BLOCKED_REASON)
+  for (const s of ['new', 'parked', 'done', 'dropped']) assert.equal(startBlockedReason(s), '')
+  // 与开工后状态推导同源：锁住的就不认领，没锁的才认领
+  for (const s of START_BLOCKED_STATUSES) assert.equal(nextStatusAfterStart(s), null)
+  assert.equal(nextStatusAfterStart('new'), 'incubating')
+})
+
+test('页面把开工锁定策略注入给网页半边', () => {
+  const html = renderPage({})
+  assert.match(html, /const START_POLICY=\{"blocked":\["incubating"\],"reason":"/)
+  assert.ok(html.includes(JSON.stringify(START_BLOCKED_REASON).slice(1, -1)))
+  assert.ok(html.includes('go-wrap'))
+  assert.ok(html.includes('aria-disabled'))
+  assert.doesNotMatch(html, /const START_POLICY=undefined/)
 })
 
 test('网页半边的协议常量与 Host 侧一致', () => {

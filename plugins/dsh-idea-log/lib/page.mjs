@@ -1,3 +1,5 @@
+import { START_BLOCKED_REASON, START_BLOCKED_STATUSES } from './start.mjs'
+
 export const KIND_LABEL = { idea: '插件点子', pitfall: '踩坑', improve: '改进点' }
 export const STATUS_LABEL = { new: '待看', incubating: '孵化中', done: '已做', parked: '搁置', dropped: '丢弃' }
 
@@ -51,14 +53,15 @@ input[type=text]:focus{border-color:var(--accent)}
 .card.open p{-webkit-line-clamp:unset;display:block}
 .tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
 .tag{font-family:var(--font-mono);font-size:10px;color:var(--muted);border:1px solid var(--line-subtle);padding:2px 7px;border-radius:999px}
-.acts{display:flex;gap:6px;margin-top:14px;flex-wrap:wrap}
+.acts{display:flex;gap:6px;margin-top:14px;flex-wrap:wrap;align-items:center}
 .act{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;color:var(--muted);background:transparent;
   border:1px solid var(--line-subtle);padding:3px 8px;border-radius:2px;cursor:pointer;transition:.2s}
 .act:hover{color:var(--ink);border-color:var(--muted)}
 .act[data-on]{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
-.act.go{color:var(--accent);border-color:var(--accent);margin-right:4px}
+.act.go{color:var(--accent);border-color:var(--accent)}
 .act.go:hover{background:var(--accent-soft);color:var(--ink)}
-.act.go[disabled]{opacity:.45;cursor:default;transform:none}
+.go-wrap{display:inline-flex;margin-right:4px}
+.act.go[disabled],.act.go[disabled]:hover{opacity:.42;cursor:not-allowed;background:transparent;color:var(--accent);border-color:var(--accent)}
 .note{min-height:20px;font-family:var(--font-mono);font-size:11px;letter-spacing:.04em;color:var(--muted);
   opacity:0;transition:opacity .2s}
 .note.on{opacity:1;color:var(--accent)}
@@ -68,10 +71,12 @@ input[type=text]:focus{border-color:var(--accent)}
   font-family:var(--font-mono);font-size:10.5px;color:var(--muted);letter-spacing:.06em;line-height:2}
 `
 
-const CLIENT_JS = `
+const CLIENT_JS = (startPolicy) => `
 const KIND_LABEL={idea:'插件点子',pitfall:'踩坑',improve:'改进点'};
 const STATUS=[['new','待看'],['incubating','孵化中'],['done','已做'],['parked','搁置'],['dropped','丢弃']];
 const START={request:'dsh-idea-log:start',started:'dsh-idea-log:started',failed:'dsh-idea-log:start-failed'};
+const START_POLICY=${JSON.stringify(startPolicy).replace(/</g, '\\u003c')};
+const START_HINT='在 DSH 里新开一个对话，把这条当成任务（只预填到输入框，不自动发送）';
 let state={kind:'',status:'',q:''};
 let items=new Map();
 let waiting=null;
@@ -107,19 +112,40 @@ function showNote(text,bad){
   noteTimer=setTimeout(function(){noteBox.classList.remove('on')},bad?7000:5000);
 }
 
+function startBlocked(status){return START_POLICY.blocked.indexOf(status)>=0}
+function blockedReason(status){return startBlocked(status)?START_POLICY.reason:''}
+
+// 开工按钮：孵化中的置灰禁用，原因挂在包一层的 span 上。
+// （disabled 的按钮在 Chromium 里不弹 title，所以提示放在外层 span。）
+function goHTML(it){
+  const blocked=startBlocked(it.status);
+  return '<span class="go-wrap" title="'+esc(blocked?START_POLICY.reason:START_HINT)+'">'+
+    '<button class="act go" type="button" data-id="'+it.id+'"'+(blocked?' disabled aria-disabled="true"':'')+'>开工 →</button></span>';
+}
+
+function syncGo(card,status){
+  if(!card) return;
+  const wrap=card.querySelector('.go-wrap');
+  const btn=wrap&&wrap.querySelector('.act.go');
+  if(!wrap||!btn) return;
+  const blocked=startBlocked(status);
+  btn.disabled=blocked;
+  if(blocked) btn.setAttribute('aria-disabled','true'); else btn.removeAttribute('aria-disabled');
+  wrap.title=blocked?START_POLICY.reason:START_HINT;
+}
+
 function cardHTML(it){
   const tags=(it.tags||[]).map(function(t){return '<span class="tag">'+esc(t)+'</span>'}).join('');
   const acts=STATUS.map(function(pair){
     return '<button class="act" data-id="'+it.id+'" data-status="'+pair[0]+'"'+(it.status===pair[0]?' data-on':'')+'>'+pair[1]+'</button>';
   }).join('');
-  const go='<button class="act go" type="button" data-id="'+it.id+'" title="在 DSH 里新开一个对话，把这条当成任务（只预填到输入框，不自动发送）">开工 →</button>';
   return '<article class="card" data-kind="'+it.kind+'" data-id="'+it.id+'" data-status="'+it.status+'">'+
     '<div class="meta"><span class="kind">'+KIND_LABEL[it.kind]+'</span><span>'+fmt(it.createdAt)+'</span>'+
     (it.source==='digest'?'<span>· 自动提炼</span>':'')+'</div>'+
     '<h3>'+esc(it.title)+'</h3>'+
     (it.body?'<p>'+esc(it.body)+'</p>':'')+
     (tags?'<div class="tags">'+tags+'</div>':'')+
-    '<div class="acts">'+go+acts+'</div>'+
+    '<div class="acts">'+goHTML(it)+acts+'</div>'+
   '</article>';
 }
 
@@ -140,7 +166,7 @@ async function load(){
 function bind(){
   grid.querySelectorAll('.card').forEach(function(card){
     card.addEventListener('click',function(e){
-      if(e.target.closest('.act')) return;
+      if(e.target.closest('.act')||e.target.closest('.go-wrap')) return;
       card.classList.toggle('open');
     });
   });
@@ -157,9 +183,12 @@ function bind(){
       try{
         await api('api/update',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:Number(id),status:status})});
         const card=btn.closest('.card');
+        const rec=items.get(Number(id));
+        if(rec) rec.status=status;
         card.querySelectorAll('.act').forEach(function(b){b.removeAttribute('data-on')});
         btn.setAttribute('data-on','');
         card.setAttribute('data-status',status);
+        syncGo(card,status);
         const st=await api('api/stats');
         renderStats(st);
       }catch(err){showNote('没保存上：'+err.message,true)}
@@ -172,14 +201,18 @@ function start(btn){
   const id=Number(btn.getAttribute('data-id'));
   const it=items.get(id);
   if(!it||!it.startPrompt){showNote('这条没有开工文案，刷新一下页面再试。',true);return}
+  const why=blockedReason(it.status);
+  if(why){showNote(why,true);return}
   if(waiting) return;
   if(window.parent===window){copyPrompt(it.startPrompt);return}
   btn.disabled=true;
   waiting={id:id,btn:btn};
   waiting.timer=setTimeout(function(){
     if(!waiting) return;
+    const b=waiting.btn;
+    const card=b?b.closest('.card'):null;
     waiting=null;
-    btn.disabled=false;
+    syncGo(card,card?card.getAttribute('data-status'):'');
     showNote('DSH 那边没回话——插件可能刚更新，刷新页面再点一次。',true);
   },5000);
   window.parent.postMessage({type:START.request,id:id,prompt:it.startPrompt},location.origin);
@@ -197,17 +230,26 @@ async function copyPrompt(prompt){
 async function settle(ok,id,error){
   if(!waiting||waiting.id!==id) return;
   const btn=waiting.btn;
+  const card=btn?btn.closest('.card'):null;
   clearTimeout(waiting.timer);
   waiting=null;
-  btn.disabled=false;
-  if(!ok){showNote('没开成：'+(error||'未知原因'),true);return}
+  if(!ok){
+    syncGo(card,card?card.getAttribute('data-status'):'');
+    showNote('没开成：'+(error||'未知原因'),true);return
+  }
   showNote('已开新对话，任务写进输入框了——看一眼就能发。');
   const it=items.get(id);
   if(it&&it.status!=='incubating'){
     try{
       await api('api/update',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id,status:'incubating'})});
-    }catch(err){showNote('对话开了，但状态没改成孵化中：'+err.message,true);return}
+      it.status='incubating';
+      if(card) card.setAttribute('data-status','incubating');
+    }catch(err){
+      syncGo(card,it.status);
+      showNote('对话开了，但状态没改成孵化中：'+err.message,true);return
+    }
   }
+  syncGo(card,it?it.status:(card?card.getAttribute('data-status'):''));
   load();
 }
 
@@ -268,6 +310,6 @@ export function renderPage({ title = '灵感账本', generatedAt = Date.now() } 
   <div class="foot">由 dsh-idea-log 生成 · ${new Date(generatedAt).toLocaleString('zh-CN')}<br>
   点卡片看全文 · 状态按钮直接落库 · 「开工」把这条交给新对话（只预填，不自动发送）· 每天自动从会话里提炼一次新点子</div>
 </div>
-<script>${CLIENT_JS}</script>
+<script>${CLIENT_JS({ blocked: START_BLOCKED_STATUSES, reason: START_BLOCKED_REASON })}</script>
 </body></html>`
 }

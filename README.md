@@ -100,7 +100,7 @@ Pixiv 和 B 站这两个 MCP 都支持 `PIXIV_MCP_TOOLS` / `BILI_MCP_TOOLS` 环�
 
 链路只能这么走：页面按钮 → `postMessage({type:'dsh-idea-log:start', id, prompt})` → 插件自己的网页半边 `lib/client.js` 收到后先验两件事（`e.origin === location.origin`、`e.source` 就是那个 iframe 的 `contentWindow`）→ 调 `uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'replace' })`，回 `started` / `start-failed`。5 秒没回执，页面自己提示「DSH 那边没回话」。
 
-几个刻意的决定：任务书由 **Host** 生成（`lib/start.mjs`，页面只是转交），这样「按类型该给什么指令」只有一处真相；**只预填、不自动发送**，人还能改；两侧的协议常量由 `tests/start.test.mjs` 检查，改一边忘了另一边会红。页面单独打开（没有父窗口）时退化成复制到剪贴板——不会假装成功。
+几个刻意的决定：任务书由 **Host** 生成（`lib/start.mjs`，页面只是转交），这样「按类型该给什么指令」只有一处真相；**只预填、不自动发送**，人还能改；两侧的协议常量由 `tests/start.test.mjs` 检查，改一边忘了另一边会红；已经是「孵化中」的条目不再给开工按钮（锁哪几种状态也只写在一处：`START_BLOCKED_STATUSES`），同一条不会反复开成几个对话。页面单独打开（没有父窗口）时退化成复制到剪贴板——不会假装成功。
 
 ---
 
