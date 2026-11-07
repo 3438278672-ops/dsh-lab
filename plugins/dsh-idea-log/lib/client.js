@@ -24,26 +24,69 @@ window.__ModuleLoader__.load({
     const START_FAILED = 'dsh-idea-log:start-failed'
     const PROMPT_MAX = 12000
 
-    // 侧栏图标：一张钉在墙上的便签，角上折一下
+    // 侧栏图标：一张钉在墙上的便签，角上折一下。
+    // 有孵化对话跑完一轮时，右上角点一个小圆点（每 20 秒问一次 Host）。
     function IdeaIcon(props) {
       const s = (props && props.size) || 18
+      const [pending, setPending] = React.useState(0)
+
+      React.useEffect(() => {
+        let alive = true
+        const load = async () => {
+          try {
+            const r = await fetch('/idea-log/api/awaiting', { cache: 'no-store', credentials: 'same-origin' })
+            if (!r.ok) return
+            const j = await r.json()
+            if (alive) setPending(Number(j && j.count) || 0)
+          } catch {}
+        }
+        load()
+        const timer = setInterval(load, 20000)
+        return () => {
+          alive = false
+          clearInterval(timer)
+        }
+      }, [])
+
       return h(
-        'svg',
+        'span',
         {
-          width: s,
-          height: s,
-          viewBox: '0 0 24 24',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.5,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          'aria-hidden': true,
+          style: { position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+          title: pending > 0 ? pending + ' 条孵化完成，等你确认' : undefined,
         },
-        h('path', { d: 'M5 3.6h9.4L20 9.2v11.2H5z' }),
-        h('path', { d: 'M14.4 3.6v5.6H20' }),
-        h('path', { d: 'M8.2 12.4h6.4' }),
-        h('path', { d: 'M8.2 16.2h4.2' }),
+        h(
+          'svg',
+          {
+            width: s,
+            height: s,
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.5,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+            'aria-hidden': true,
+          },
+          h('path', { d: 'M5 3.6h9.4L20 9.2v11.2H5z' }),
+          h('path', { d: 'M14.4 3.6v5.6H20' }),
+          h('path', { d: 'M8.2 12.4h6.4' }),
+          h('path', { d: 'M8.2 16.2h4.2' }),
+        ),
+        pending > 0
+          ? h('span', {
+              'aria-hidden': true,
+              style: {
+                position: 'absolute',
+                top: -1,
+                right: -1,
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: '#d4a04a',
+                boxShadow: '0 0 0 2px #161311',
+              },
+            })
+          : null,
       )
     }
 

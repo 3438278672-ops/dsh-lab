@@ -33,18 +33,10 @@
   和「动手前先确认范围」的要求一起预填进输入框（只预填，不自动发送），条目顺手标成「孵化中」
 - 已经是「孵化中」的条目，开工按钮会置灰禁用（悬停在外层说明原因）；把它改成待看 / 搁置 /
   已做 / 丢弃后按钮立刻恢复可点。判断规则只有一处：`lib/start.mjs` 的 `START_BLOCKED_STATUSES`
+- 孵化对话跑完一轮后，卡片上会出现「对话已结束 · 标为已做？」：点「标为已做」落成 `done`，
+  点「先不标」只收起提示、继续孵化。侧栏图标右上角同时点一个小圆点，提醒有几条在等你确认。
+  功能上线前就开着、没记过会话的旧条目，等你在那条对话里再发一条消息时会按历史任务书里的标记自动补绑
 - 主机端只接受同源请求，别的网页读不到你的账本
-
-<p>
-  <img src="docs/wall.jpg" width="49%" alt="灵感墙：统计、类型 tab、状态筛选、卡片">
-  <img src="docs/wall-open.jpg" width="49%" alt="点开卡片看全文，底下一排状态按钮和「开工 →」">
-</p>
-<p>
-  <img src="docs/wall-filter.jpg" width="49%" alt="按类型筛到「插件点子」">
-</p>
-
-> 截图里是假数据（临时库里灌了十几条虚构条目），不是谁的私人账本。
-
 
 ## 每日提炼怎么跑
 
@@ -80,7 +72,7 @@
 ## 开发
 
 ```bash
-npm test     # node:test，13 个用例（去重 / 筛选 / 多帧解压 / 素材抽取 / 定时判定 / 开工任务书 / 孵化中锁开工）
+npm test     # node:test，18 个用例（去重 / 筛选 / 多帧解压 / 素材抽取 / 定时判定 / 开工任务书 / 孵化中锁开工 / 完成反馈绑定与等确认）
 ```
 
 目录：
@@ -92,13 +84,17 @@ lib/digest.mjs    会话扫描、多帧解压、素材抽取、提示词、解�
 lib/llm.mjs       DSH llm 服务的薄封装（流式收文本）
 lib/page.mjs      灵感墙 HTML（午夜墨风格）
 lib/start.mjs     「开工」任务书：按类型生成要交给新对话的提示词
+lib/watch.mjs     孵化完成反馈：把开工的对话与条目绑上，跑完一轮标记「等确认」
 lib/web.mjs       /idea-log 的 Host 路由与 JSON API
 lib/client.js     侧栏入口与 iframe 面板（收 iframe 的开工请求，开新对话并预填）
 ```
 
-「开工」的链路：灵感墙（iframe）→ `postMessage({type:'dsh-idea-log:start'})` →
+「开工」的链路：灵感墙（iframe）→ `POST /idea-log/api/starting`（Host 记下这条灵感，等新对话出现）
+→ `postMessage({type:'dsh-idea-log:start'})` →
 `lib/client.js` 校验同源与来源窗口 → `uiWorkspace.startSession(undefined, {prompt, whenDraftExists:'replace'})`
-→ 回 `started` / `start-failed`。两边协议常量由 `tests/start.test.mjs` 守着，改一处忘了另一处会红。
+→ 回 `started` / `start-failed`。Host 侧 `lib/watch.mjs` 用 `session/created` 的时间窗先绑上对话，
+用户真发出首条消息后再以「【灵感账本 #N ·」标记为准纠正；对话 `api-session/status` 从 running 变空闲时
+给条目记 `awaiting_done`。两边协议常量由 `tests/start.test.mjs` 守着，改一处忘了另一处会红。
 
 ## License
 

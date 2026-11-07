@@ -49,7 +49,8 @@ export function findCandidates(db, who) {
   }
 
   const rows = db
-    .prepare("select user_id, chat_key, names, msg_count from members where names like ? order by msg_count desc")
+    // 昵称里的 _ 和 % 要当普通字符：转义了就得配 ESCAPE，否则 LIKE 会把 \_ 当字面量
+    .prepare("select user_id, chat_key, names, msg_count from members where names like ? escape '\\' order by msg_count desc")
     .all('%' + s.replace(/[%_]/g, (c) => '\\' + c) + '%')
   const byUser = new Map()
   for (const r of rows) {
@@ -62,8 +63,14 @@ export function findCandidates(db, who) {
     c.chats.push({ chatKey: r.chat_key, msgCount: r.msg_count })
     c.msgCount += r.msg_count
   }
+  const needle = s.toLowerCase()
   return [...byUser.values()]
-    .map((c) => ({ ...c, names: [...c.names] }))
+    .map((c) => {
+      const names = [...c.names].filter((n) => !SYSTEM_NAME_RE.test(n))
+      return { ...c, names, exact: names.some((n) => n.toLowerCase() === needle) }
+    })
+    // 只在系统消息里出现过的号（「XX 邀请 YY 加入…」）不是真人，别当候选
+    .filter((c) => c.names.length > 0)
     .sort((a, b) => b.msgCount - a.msgCount)
 }
 
@@ -143,30 +150,40 @@ function mentionStats(db, userId, chatKey) {
     .map(([id, n]) => ({ userId: id, count: n, name: latestName(db, id) }))
 }
 
+// 系统消息的 sender 也会被记成某个真人，取最近名字时要跳过它们，
+// 否则 @ 关系里会冒出「XX 邀请 YY 加入了群聊」这种假名字。
+const SYSTEM_NAME_RE = /加入|邀请|撤回|禁言|红包|群公告|改名为|退群|踢出|移出/
+
 function latestName(db, userId) {
-  const row = db.prepare('select sender_name from messages where sender_id = ? order by ts desc limit 1').get(userId)
-  return nameOf(row)
+  const rows = db.prepare('select sender_name from messages where sender_id = ? order by ts desc limit 30').all(userId)
+  for (const row of rows) {
+    const name = nameOf(row)
+    if (name && !SYSTEM_NAME_RE.test(name)) return name
+  }
+  return ''
 }
 
 function mentionedBy(db, userId, chatKey) {
   const rows = chatKey
     ? db.prepare(
-        "select sender_id, sender_name, count(*) as n from messages where chat_key = ? and text like ? and sender_id <> ? group by sender_id order by n desc limit 8",
+        'select sender_id, count(*) as n from messages where chat_key = ? and text like ? and sender_id <> ? group by sender_id order by n desc limit 8',
       ).all(chatKey, '%@' + userId + '%', userId)
     : db.prepare(
-        "select sender_id, sender_name, count(*) as n from messages where text like ? and sender_id <> ? group by sender_id order by n desc limit 8",
+        'select sender_id, count(*) as n from messages where text like ? and sender_id <> ? group by sender_id order by n desc limit 8',
       ).all('%@' + userId + '%', userId)
   return rows
-    .map((r) => ({ userId: r.sender_id, name: nameOf(r), count: r.n }))
+    .map((r) => ({ userId: r.sender_id, name: latestName(db, r.sender_id), count: r.n }))
     // 群系统消息的 sender_name 常被写成「XX 邀请 YY 加入了群聊」，不是真人
-    .filter((r) => !/加入|邀请|撤回|禁言|红包/.test(r.name))
+    .filter((r) => !SYSTEM_NAME_RE.test(r.name))
 }
 
 /**
  * 生成人物档案。
+ * @param {object} [opts.mentions] 预先算好的 @ 关系 { mentionsOut, mentionedBy }（构建看板时由索引批量给出，
+ *   省掉每人一条全表 LIKE）
  * @returns {object} { candidate, stats, chats, hours, peak, kinds, media, topWords, mentionsOut, mentionedBy, recent, summary }
  */
-export function buildProfile(db, chatNames, { userId, chatKey = null, topLimit = 3000 } = {}) {
+export function buildProfile(db, chatNames, { userId, chatKey = null, topLimit = 3000, mentions = null } = {}) {
   const scope = chatKey ? ' and chat_key = ?' : ''
   const scopeArgs = chatKey ? [chatKey] : []
 
@@ -237,8 +254,8 @@ export function buildProfile(db, chatNames, { userId, chatKey = null, topLimit =
     }))
 
   const top = topWords(db, userId, chatKey, topLimit)
-  const mentionsOut = mentionStats(db, userId, chatKey)
-  const byWhom = mentionedBy(db, userId, chatKey)
+  const mentionsOut = mentions ? mentions.mentionsOut || [] : mentionStats(db, userId, chatKey)
+  const byWhom = mentions ? mentions.mentionedBy || [] : mentionedBy(db, userId, chatKey)
   const firstTs = chats.length ? Math.min(...chats.map((c) => c.firstTs)) : 0
   const lastTs = chats.length ? Math.max(...chats.map((c) => c.lastTs)) : 0
 

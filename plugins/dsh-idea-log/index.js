@@ -4,6 +4,7 @@ import { addIdea, getMeta, ideaStats, listIdeas, openIdeas, setMeta, updateIdea,
 import { runDigest, listSessionFiles, defaultSessionRoot } from './lib/digest.mjs'
 import { getLlm, listRoutes, pickRoute, streamText } from './lib/llm.mjs'
 import { registerIdeaWeb } from './lib/web.mjs'
+import { createCompletionWatcher } from './lib/watch.mjs'
 
 export const name = 'dsh-idea-log'
 export const inject = ['tools', 'webServer']
@@ -86,8 +87,18 @@ export function apply(ctx, config = {}) {
     } catch {}
   }
 
+  // ---------- 孵化完成反馈 ----------
+  // 盯住开工开出的对话：绑定 idea ↔ session，跑完一轮就在条目上等确认。
+  let watcher = null
+  try {
+    watcher = createCompletionWatcher(ctx, { home: homeOf(cfg), log })
+    ctx.effect(() => () => watcher.dispose())
+  } catch (e) {
+    log(`完成反馈监听没挂上：${e?.message || e}`)
+  }
+
   // ---------- 网页入口 ----------
-  if (ctx.webServer) registerIdeaWeb(ctx, { home: homeOf(cfg), log })
+  if (ctx.webServer) registerIdeaWeb(ctx, { home: homeOf(cfg), log, watcher })
 
   // ---------- 工具 ----------
   ctx.effect(() =>

@@ -11,6 +11,7 @@
  * 上千条原始消息不该进 prompt——那是档案库自己的事。
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { splitStoredImpression } from './impression.mjs'
 import { join } from 'node:path'
 
 export const PEOPLE_FILE = 'people.json'
@@ -36,19 +37,9 @@ function clip(text, max) {
 // 早期生成的印象里混进过「整段 JSON 当正文」的记录（模型输出没被拆干净就落了库）。
 // 有的 JSON 里还夹着没转义的引号，JSON.parse 会失败，所以先正规解析、再用正则兜底。
 function cleanImpression(raw) {
-  const s = String(raw ?? '').trim()
-  if (!s) return ''
-  if (s.startsWith('{')) {
-    try {
-      const v = JSON.parse(s)
-      if (typeof v?.impression === 'string') return clip(v.impression, IMPRESSION_CHARS)
-    } catch {
-      /* 落到下面的正则兜底 */
-    }
-    const m = s.match(/"impression"\s*:\s*"([\s\S]*?)"\s*,\s*"tags"/)
-    if (m) return clip(m[1].replace(/\\"/g, '"'), IMPRESSION_CHARS)
-  }
-  return clip(s, IMPRESSION_CHARS)
+  // 老数据可能把整段 JSON 存进了 impression 列，统一从这里拆
+  const { text } = splitStoredImpression(raw)
+  return clip(text, IMPRESSION_CHARS)
 }
 
 // 群的系统消息（「X 邀请 Y 加入」「撤回了一条消息」）也会占用 sender_name，

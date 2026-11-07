@@ -38,12 +38,28 @@ export function ideasHome(home) {
   return dir
 }
 
+// 老库升级：后加的列在这里补，别在 SCHEMA 里硬塞（create table if not exists 不会改已有表）。
+// session_id 记「开工」开出的对话；awaiting_done 是「这一轮跑完了，等人确认」；
+// turn_done_at 是最近一次跑完的时间（展示用）。
+function ensureIdeaColumns(db) {
+  const have = new Set(db.prepare('pragma table_info(ideas)').all().map((r) => r.name))
+  const add = [
+    ['session_id', 'text'],
+    ['awaiting_done', 'integer not null default 0'],
+    ['turn_done_at', 'integer'],
+  ]
+  for (const [name, decl] of add) {
+    if (!have.has(name)) db.exec(`alter table ideas add column ${name} ${decl}`)
+  }
+}
+
 export function openIdeas(home) {
   const dir = ideasHome(home)
   const path = join(dir, 'ideas.db')
   const db = new DatabaseSync(path)
   db.exec('pragma journal_mode = wal;')
   db.exec(SCHEMA)
+  ensureIdeaColumns(db)
   return { db, path, dir }
 }
 
@@ -120,6 +136,9 @@ function hydrate(row) {
     tags: parseTags(row.tags),
     source: row.source,
     status: row.status,
+    sessionId: row.session_id || null,
+    awaitingDone: Number(row.awaiting_done || 0) === 1,
+    turnDoneAt: row.turn_done_at == null ? null : Number(row.turn_done_at),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   }
@@ -157,6 +176,8 @@ export function updateIdea(db, { id, status = null, title = null, body = null, t
   if (status) {
     sets.push('status = ?')
     args.push(normalizeStatus(status))
+    // 手动改状态就当作已经看过「跑完了」提示，别让旧提醒挂着。
+    sets.push('awaiting_done = 0')
   }
   if (title !== null && String(title).trim()) {
     sets.push('title = ?')
@@ -175,6 +196,66 @@ export function updateIdea(db, { id, status = null, title = null, body = null, t
   args.push(Date.now())
   db.prepare(`update ideas set ${sets.join(', ')} where id = ?`).run(...args, Number(id))
   return hydrate(db.prepare('select * from ideas where id = ?').get(Number(id)))
+}
+
+/**
+ * 把一条灵感绑到它开出的对话上。重新开工时以最后一次绑定为准，顺便清掉旧的完成提示。
+ * 只绑「孵化中」的条目：别的状态不该再占着对话。
+ * @returns {object|null} 更新后的条目；不存在或状态不对返回 null
+ */
+export function bindIdeaSession(db, id, sessionId) {
+  const row = db.prepare('select * from ideas where id = ?').get(Number(id))
+  if (!row || row.status !== 'incubating') return null
+  const sid = String(sessionId || '').trim()
+  if (!sid) return null
+  db.prepare('update ideas set session_id = ?, awaiting_done = 0, turn_done_at = null where id = ?').run(sid, Number(id))
+  return hydrate(db.prepare('select * from ideas where id = ?').get(Number(id)))
+}
+
+/** 解开绑定（改绑到另一条灵感前先摘干净） */
+export function clearIdeaSession(db, id) {
+  db.prepare('update ideas set session_id = null, awaiting_done = 0, turn_done_at = null where id = ?').run(Number(id))
+  return hydrate(db.prepare('select * from ideas where id = ?').get(Number(id)))
+}
+
+/** 这个对话绑的是哪条灵感（只看孵化中的） */
+export function ideaBySession(db, sessionId) {
+  const sid = String(sessionId || '').trim()
+  if (!sid) return null
+  const row = db
+    .prepare('select * from ideas where session_id = ? and status = ? order by updated_at desc limit 1')
+    .get(sid, 'incubating')
+  return hydrate(row)
+}
+
+/** 对话跑完一轮：打上「等确认」。只对孵化中、且绑定对得上的条目生效。 */
+export function markTurnDone(db, id, at = Date.now()) {
+  const row = db.prepare('select * from ideas where id = ?').get(Number(id))
+  if (!row || row.status !== 'incubating') return null
+  db.prepare('update ideas set awaiting_done = 1, turn_done_at = ? where id = ?').run(Number(at), Number(id))
+  return hydrate(db.prepare('select * from ideas where id = ?').get(Number(id)))
+}
+
+/** 人点了「标为已做」：结束孵化 */
+export function confirmIdeaDone(db, id) {
+  const row = db.prepare('select * from ideas where id = ?').get(Number(id))
+  if (!row) return null
+  db.prepare('update ideas set status = ?, awaiting_done = 0, updated_at = ? where id = ?').run('done', Date.now(), Number(id))
+  return hydrate(db.prepare('select * from ideas where id = ?').get(Number(id)))
+}
+
+/** 人点了「先不标」：只收起提示，继续孵化 */
+export function dismissIdeaDone(db, id) {
+  db.prepare('update ideas set awaiting_done = 0 where id = ?').run(Number(id))
+  return hydrate(db.prepare('select * from ideas where id = ?').get(Number(id)))
+}
+
+/** 现在有哪几条在等确认（孵化中 + awaiting_done） */
+export function awaitingIdeas(db) {
+  return db
+    .prepare('select * from ideas where status = ? and awaiting_done = 1 order by turn_done_at desc, id desc')
+    .all('incubating')
+    .map(hydrate)
 }
 
 export function deleteIdea(db, id) {

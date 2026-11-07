@@ -4,11 +4,25 @@
  * 数据在导出时快照进 HTML；收藏与批注存在浏览器 localStorage，
  * 「导出存档」把这两样和当天日报一起落成文件——这才算永久档。
  */
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { resolve } from 'node:path'
 import { buildGraph } from './graph.mjs'
+import { splitStoredImpression } from './impression.mjs'
+import { buildMentionIndex, mentionsFor } from './mentions.mjs'
 import { buildProfile } from './people.mjs'
 import { dayBounds } from './report.mjs'
+import {
+  CACHE_VERSION,
+  aggregateUsers,
+  chatFingerprints,
+  dbFingerprint,
+  htmlPath,
+  htmlStat,
+  restoreUsers,
+  serializeUsers,
+  userFingerprints,
+  userSig,
+  writeFileAtomic,
+} from './snapshot.mjs'
 
 const PLACEHOLDER_RE = /^\[[^\]]{1,6}\]$/
 
@@ -34,10 +48,27 @@ function countOf(db, chatKey, fromTs, toTs) {
 }
 
 /**
- * 导出看板用的全部数据。
+ * 导出看板用的全部数据（全量：不读快照，所有档案都现算）。
  * @param {import('node:sqlite').DatabaseSync} db
  */
-export function buildDashboardData(db, { home = '', feedLimit = 300, peopleLimit = 60, peoplePerChat = 40 } = {}) {
+export function buildDashboardData(db, opts = {}) {
+  return buildBoardData(db, opts).data
+}
+
+/**
+ * 组装看板数据，能复用的复用。
+ *
+ * 粒度：会话 → 会话里的人 → 跨群合计的人。没变的会话、没变的人直接拿上一份
+ * 快照里的结果；@ 关系不缓存（一遍扫描的索引每次现算 40 ms），所以别人新
+ * @ 了你，不需要重算你的档案。
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {object} [opts]
+ * @param {object|null} [opts.snapshot] 上一次的快照；null / 不传 = 全量
+ * @returns {{ data: object, snapshot: object, stats: object }}
+ */
+export function buildBoardData(db, { feedLimit = 300, peopleLimit = 60, peoplePerChat = 40, snapshot = null } = {}) {
+  const started = Date.now()
   const today = dayBounds('today')
   const yesterday = dayBounds('yesterday')
 
@@ -91,55 +122,106 @@ export function buildDashboardData(db, { home = '', feedLimit = 300, peopleLimit
     .filter((m) => !PLACEHOLDER_RE.test(m.text.trim()))
     .reverse()
 
-  const graph = buildGraph(db, { sinceTs: 0, maxNodes: 70 })
-
-  // 一个群一块探案板：每个会话单独算一份 @ 关系，外加一块「全部」（只画最活跃的 50 人，免得板子挤成一团）
-  const graphs = { '*': buildGraph(db, { sinceTs: 0, maxNodes: 50 }) }
-  for (const c of chats) {
-    graphs[c.key] = buildGraph(db, { chatKey: c.key, sinceTs: 0, maxNodes: 45 })
-  }
+  const chatNames = new Map(chats.map((c) => [c.key, c.name]))
 
   const profiles = {}
   const profileRows = db.prepare("select user_id, impression, tags from profiles where chat_key = '*'").all()
-  for (const r of profileRows) {
-    if (r.impression) profiles[String(r.user_id)] = String(r.impression)
-  }
-
-  // 群友档案：先选群，再看这个群里的人。
-  // 「全部」跨群汇总取前 peopleLimit 人；每个群各取该群发言最多的 peoplePerChat 人。
-  const chatNames = new Map(chats.map((c) => [c.key, c.name]))
   const tagOf = new Map()
   for (const r of profileRows) {
-    let tags = []
-    try {
-      const v = r.tags ? JSON.parse(r.tags) : []
-      if (Array.isArray(v)) tags = v
-    } catch {}
+    const { text, tags } = splitStoredImpression(r.impression, r.tags)
+    if (text) profiles[String(r.user_id)] = text
     tagOf.set(String(r.user_id), tags)
   }
-  const buildPeople = (chatKey, limit) => {
-    const rows = chatKey
-      ? db
-          .prepare(
-            "select sender_id as user_id, count(*) as n from messages where chat_key = ? and sender_id <> '' group by sender_id order by n desc limit ?",
-          )
-          .all(chatKey, limit)
-      : db
-          .prepare('select user_id, sum(msg_count) as n from members group by user_id order by n desc limit ?')
-          .all(limit)
-    return rows.map((row) => {
-      const userId = String(row.user_id)
-      const p = buildProfile(db, chatNames, { userId, chatKey, topLimit: 500 })
-      const { summary, ...rest } = p
-      return { ...rest, impression: profiles[userId] || '', tags: tagOf.get(userId) || [] }
-    })
+
+  // @ 关系：一遍扫描的索引，全局与每个群一起算
+  const mentionIndex = buildMentionIndex(db)
+
+  // 哪些群变了
+  const fps = chatFingerprints(db)
+  const prevChats = snapshot?.chats || {}
+  const dirty = new Set()
+  for (const c of chats) {
+    if (!prevChats[c.key] || prevChats[c.key].sig !== (fps.get(c.key)?.sig || '')) dirty.add(c.key)
   }
-  const peopleByChat = { '*': buildPeople(null, peopleLimit) }
-  for (const c of chats) peopleByChat[c.key] = buildPeople(c.key, peoplePerChat)
+  const structureChanged = !snapshot || dirty.size > 0 || Object.keys(prevChats).length !== chats.length
+
+  const stats = { rebuiltChats: 0, reusedChats: 0, rebuiltProfiles: 0, reusedProfiles: 0 }
+
+  const graph = structureChanged || !snapshot?.graph ? buildGraph(db, { sinceTs: 0, maxNodes: 70 }) : snapshot.graph
+  const graphAll = structureChanged || !snapshot?.graphAll ? buildGraph(db, { sinceTs: 0, maxNodes: 50 }) : snapshot.graphAll
+
+  const userMaps = new Map()
+  const nextChats = {}
+  const graphs = { '*': graphAll }
+  const peopleByChat = {}
+
+  for (const c of chats) {
+    const prev = prevChats[c.key]
+    const clean = !dirty.has(c.key) && Boolean(prev)
+    const users = clean ? restoreUsers(prev.users) : userFingerprints(db, c.key)
+    userMaps.set(c.key, users)
+
+    let chatGraph
+    let entries
+    if (clean) {
+      chatGraph = prev.graph
+      entries = prev.people
+      stats.reusedChats++
+      stats.reusedProfiles += entries.length
+    } else {
+      chatGraph = buildGraph(db, { chatKey: c.key, sinceTs: 0, maxNodes: 45 })
+      const cached = new Map((prev?.people || []).map((e) => [e.id, e]))
+      entries = [...users.entries()]
+        .sort((a, b) => b[1][0] - a[1][0] || Number(a[0]) - Number(b[0]))
+        .slice(0, peoplePerChat)
+        .map(([id]) => {
+          const sig = userSig(users.get(id))
+          const hit = cached.get(id)
+          if (hit && hit.sig === sig) {
+            stats.reusedProfiles++
+            return hit
+          }
+          stats.rebuiltProfiles++
+          const p = buildProfile(db, chatNames, {
+            userId: id,
+            chatKey: c.key,
+            topLimit: 500,
+            mentions: mentionsFor(mentionIndex, id, c.key),
+          })
+          return { id, sig, p: stripProfile(p) }
+        })
+      stats.rebuiltChats++
+    }
+
+    nextChats[c.key] = { sig: fps.get(c.key)?.sig || '', graph: chatGraph, people: entries, users: serializeUsers(users) }
+    graphs[c.key] = chatGraph
+    peopleByChat[c.key] = entries.map((e) => decorate(e, mentionIndex, c.key, profiles, tagOf))
+  }
+
+  // 跨群「全部」：名单来自 members 的发言合计，指纹用各群的人指纹合计
+  const agg = aggregateUsers(userMaps)
+  const cachedGlobal = new Map((snapshot?.global?.people || []).map((e) => [e.id, e]))
+  const globalRows = db
+    .prepare('select user_id, sum(msg_count) as n from members group by user_id order by n desc limit ?')
+    .all(peopleLimit)
+  const globalEntries = globalRows.map((row) => {
+    const id = String(row.user_id)
+    const sig = userSig(agg.get(id) || [0, 0, 0])
+    const hit = cachedGlobal.get(id)
+    if (hit && hit.sig === sig) {
+      stats.reusedProfiles++
+      return hit
+    }
+    stats.rebuiltProfiles++
+    const p = buildProfile(db, chatNames, { userId: id, topLimit: 500, mentions: mentionsFor(mentionIndex, id, '*') })
+    return { id, sig, p: stripProfile(p) }
+  })
+  peopleByChat['*'] = globalEntries.map((e) => decorate(e, mentionIndex, '*', profiles, tagOf))
 
   const totalMsgs = db.prepare('select count(*) c from messages').get().c
-  return {
-    generatedAt: Date.now(),
+  const generatedAt = Date.now()
+  const data = {
+    generatedAt,
     today: today.day,
     yesterday: yesterday.day,
     totalMsgs,
@@ -150,6 +232,34 @@ export function buildDashboardData(db, { home = '', feedLimit = 300, peopleLimit
     graphs,
     profiles,
     peopleByChat,
+  }
+  const next = {
+    version: CACHE_VERSION,
+    builtAt: generatedAt,
+    fp: '',
+    html: null,
+    chats: nextChats,
+    global: { people: globalEntries },
+    graph,
+    graphAll,
+  }
+  return { data, snapshot: next, stats: { ...stats, ms: Date.now() - started } }
+}
+
+/** 档案里会变的展示字段（@ 关系、印象标签）不进缓存，装配时现贴。 */
+function stripProfile(p) {
+  const { summary, mentionsOut, mentionedBy, ...rest } = p
+  return rest
+}
+
+function decorate(entry, index, scope, profiles, tagOf) {
+  const { mentionsOut, mentionedBy } = mentionsFor(index, entry.id, scope)
+  return {
+    ...entry.p,
+    mentionsOut,
+    mentionedBy,
+    impression: profiles[entry.id] || '',
+    tags: tagOf.get(entry.id) || [],
   }
 }
 
@@ -283,22 +393,33 @@ function fmt(n) {
 
 /**
  * 导出看板 HTML。
- * @returns {{path, bytes, chats, reports, nodes}}
+ *
+ * 传 snapshot 就能增量：只重算变了的会话与变了的人；返回的 snapshot 是这一次
+ * 构建后的新快照，调用方负责落盘。outPath 指到别处时不返回快照（避免拿一份
+ * 写歪的 HTML 去当缓存凭据）。
+ *
+ * @returns {{path, bytes, chats, reports, nodes, people, peopleByChat, date, stats, snapshot}}
  */
-export function exportDashboard(db, { home = '', outPath, title = '群聊档案馆', feedLimit = 300 } = {}) {
-  const data = buildDashboardData(db, { home, feedLimit })
+export function exportDashboard(db, { home = '', outPath, title = '群聊档案馆', feedLimit = 300, snapshot = null } = {}) {
+  const { data, snapshot: next, stats } = buildBoardData(db, { feedLimit, snapshot })
   const html = renderDashboard(data, { title })
-  const path = outPath || join(home, 'dashboard.html')
-  writeFileSync(path, html, 'utf8')
+  const path = outPath || htmlPath(home)
+  const publish = writeFileAtomic(path, html)
+  next.fp = dbFingerprint(db)
+  next.html = htmlStat(path)
+  const canonical = !outPath || resolve(path) === resolve(htmlPath(home))
   return {
     path,
     bytes: Buffer.byteLength(html, 'utf8'),
+    publish,
     chats: data.chats.length,
     reports: data.reportCards.filter((c) => c.today).length,
     nodes: data.graph.nodes.length,
     people: (data.peopleByChat['*'] || []).length,
     peopleByChat: Object.keys(data.peopleByChat).length,
     date: data.today,
+    stats,
+    snapshot: canonical ? next : null,
   }
 }
 

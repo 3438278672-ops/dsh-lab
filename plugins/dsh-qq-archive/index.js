@@ -16,7 +16,7 @@ import { syncOnce, isSyncing } from './lib/ingest.mjs'
 import { downloadPending, mediaDir } from './lib/media.mjs'
 import { exportViewer } from './lib/export.mjs'
 import { buildReport, buildReportPrompt, dayBounds, dueForReport, markReportDay, readReport, REPORT_SYSTEM, saveReport } from './lib/report.mjs'
-import { exportDashboard } from './lib/dashboard.mjs'
+import { createBoard } from './lib/board.mjs'
 import { exportPeopleCard } from './lib/peoplecard.mjs'
 import { registerArchiveWeb } from './lib/web.mjs'
 import { buildSemantic, messagesByIds, semanticReady, semanticSearch } from './lib/semantic.mjs'
@@ -187,12 +187,13 @@ export function apply(ctx, config) {
   const log = ctx.logger ? ctx.logger('qq-archive') : console
 
   // DSH 网页里的侧栏入口：点一下就能看看板（Host 静态前缀 /qq-archive）
-  if (ctx.webServer) {
-    registerArchiveWeb(ctx, {
-      home: cfg.home,
-      log: (msg) => (log.info ? log.info(msg) : log.log?.(msg)),
-    })
-  }
+  // 看板构建器由插件持有：同步 / 日报 / 印象写完库都叫它预热一份，网页那边只负责发文件。
+  const boardLog = (msg) => (log.info ? log.info(msg) : log.log?.(msg))
+  const board = createBoard({
+    home: cfg.home,
+    getDb: () => ensureArchive().db,
+    log: boardLog,
+  })
 
   let archive = null
   let source = null
@@ -206,6 +207,40 @@ export function apply(ctx, config) {
   function ensureArchive() {
     if (!archive) archive = { ...openArchive(cfg.home), home: cfg.home }
     return archive
+  }
+
+  /**
+   * 档案卡用：只在「这个会话」的视角里读一个人。
+   * 会话 key 就是隔离边界——A 群查不到 B 群里的发言、时段和 @ 关系。
+   */
+  function profileFor(chatKey, userId) {
+    const db = ensureArchive().db
+    const chat = db.prepare('select name from chats where chat_key = ?').get(chatKey)
+    if (!chat) return null
+    const chatNames = new Map(listChats(db, 500).map((c) => [c.key, c.name]))
+    const profile = buildProfile(db, chatNames, { userId, chatKey, topLimit: 500 })
+    if (!profile || !profile.total) return null
+    // 统一走 readImpression：老数据里可能存的是整段 JSON，读的时候已经拆回文字 + 标签
+    const imp = readImpression(db, userId)
+    profile.impression = imp?.impression || ''
+    profile.tags = (imp?.tags || []).slice(0, 6)
+    return {
+      profile,
+      meta: { chatName: chat.name, today: new Date().toISOString().slice(0, 10) },
+    }
+  }
+
+  /** 在某个会话里按昵称找人：只返回在这个群说过话的人。 */
+  function lookupInChat(chatKey, who) {
+    const db = ensureArchive().db
+    const list = findCandidates(db, who).filter((c) => (c.chats || []).some((x) => x.chatKey === chatKey))
+    // 名字完全对上的优先；「drill_up」不该把「drill_up 邀请…」这种也算进来
+    const exact = list.filter((c) => c.exact)
+    return (exact.length ? exact : list).slice(0, 8)
+  }
+
+  if (ctx.webServer) {
+    registerArchiveWeb(ctx, { home: cfg.home, board, log: boardLog, profileFor, lookupInChat })
   }
 
   function ensureSource() {
@@ -226,6 +261,8 @@ export function apply(ctx, config) {
     const src = ensureSource()
     const result = await syncOnce({ archive: arch, adapter: src.adapter, cfg, onProgress, full })
     if (result.inserted > 0) maybeDownloadMedia()
+    // 库变了，看板该重算了（没变的话 build 自己会跳过，只花几毫秒比指纹）
+    board.prewarm()
     return result
   }
 
@@ -286,6 +323,8 @@ export function apply(ctx, config) {
       setMeta(arch.db, 'last_impression_date', isoDate(Math.floor(Date.now() / 1000)))
       setMeta(arch.db, 'last_impression_at', String(Math.floor(Date.now() / 1000)))
       log.info?.(`人物印象批量完成：生成 ${done} 个，跳过 ${result.skipped} 个`)
+      // 印象写进了 profiles，看板的人物档案要跟着换
+      board.prewarm()
     } catch (e) {
       log.warn?.(`人物印象批量失败：${e.message}`)
     }
@@ -318,6 +357,7 @@ export function apply(ctx, config) {
       if (r.done > 0) {
         markReportDay(arch.db, targetDay)
         log.info?.(`日报定时完成：${targetDay} 生成 ${r.done} 份，跳过 ${r.skipped} 份，失败 ${r.failed} 份`)
+        board.prewarm()
       } else if (r.failed > 0) {
         reportNextRetry = Date.now() + 30 * 60 * 1000
         log.warn?.(`日报定时失败 ${r.failed} 份，30 分钟后再试`)
@@ -361,7 +401,10 @@ export function apply(ctx, config) {
 
   // 启动后后台预热一次，别阻塞插件加载
   setTimeout(() => {
-    doSync({ full: dbStats(ensureArchive().db).total === 0 }).catch((e) => log.warn?.(`启动同步失败：${e.message}`))
+    doSync({ full: dbStats(ensureArchive().db).total === 0 })
+      .catch((e) => log.warn?.(`启动同步失败：${e.message}`))
+      // 同步完成后把看板预热好：下次打开就是现成的（已有快照时这里只是一次指纹比对）
+      .finally(() => board.prewarm())
     schedule()
     scheduleImpressions()
     scheduleReports()
@@ -748,21 +791,38 @@ export function apply(ctx, config) {
         }
 
         if (action === 'dashboard') {
-          const r = exportDashboard(arch.db, {
-            home: cfg.home,
+          // 手上要一份「现在就准」的：强制走一次增量构建（没变的东西照样复用快照）
+          const r = await board.build({
+            force: true,
             outPath: args.out || undefined,
             title: args.title || '群聊档案馆',
           })
           // 顺手把「熟人卡」也刷新一遍：QQ 桥接每次唤醒读的就是这份 people.json
           const card = exportPeopleCard(arch.db, { home: cfg.home })
+          const st = r.stats || {}
           const summary = [
             `本地看板已生成：${r.path}`,
             `包含 ${r.chats} 个会话 / ${r.reports} 份 ${r.date} 的日报 / ${r.nodes} 个关系节点，${Math.max(1, Math.round(r.bytes / 1024))} KB。`,
+            `这次增量：重算 ${st.rebuiltChats || 0} 个会话、${st.rebuiltProfiles || 0} 份档案，复用 ${st.reusedChats || 0} 个会话、${st.reusedProfiles || 0} 份档案，用时 ${st.ms || 0} ms。`,
+            r.publish === 'inplace' ? '注意：dashboard.html 正被别的进程占用，这次是原地覆盖写入（内容是新的，只是少了原子替换）。' : '',
             `熟人卡已同步：${card.chats} 个会话 / ${card.people} 人（${card.path}），QQ 那边下次唤醒就会读到。`,
             '双击这个 HTML 就能打开：今日总结、探案板（一个群一块板子，红线是 @ 关系）、群友档案（点开看人物印象和活跃分布）、收藏夹、最近档案。',
             '收藏和批注存在浏览器 localStorage，点「导出存档」才会落成文件——那才是永久档。',
           ].join('\n')
-          return { ok: true, summary, ...r, peopleCard: card }
+          return {
+            ok: true,
+            summary,
+            path: r.path,
+            bytes: r.bytes,
+            chats: r.chats,
+            reports: r.reports,
+            nodes: r.nodes,
+            people: r.people,
+            peopleByChat: r.peopleByChat,
+            date: r.date,
+            stats: st,
+            peopleCard: card,
+          }
         }
 
         if (action === 'export') {
@@ -843,6 +903,8 @@ export function apply(ctx, config) {
             }
           }
           const fresh = ensureArchive()
+          // 旧库已经删了，快照里的人和群都不能再信
+          board.invalidate()
           const result = await doSync({ full: true })
           const stats = dbStats(fresh.db)
           return { ok: true, summary: `已重建索引：${stats.total} 条消息 / ${stats.chats} 个会话，用时 ${Math.round(result.tookMs / 1000)} 秒。`, result, stats }

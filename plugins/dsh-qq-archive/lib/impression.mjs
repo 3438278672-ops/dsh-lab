@@ -136,16 +136,49 @@ export function saveImpression(db, userId, { impression, tags, model, stats }) {
   return at
 }
 
+/**
+ * 老版本可能把模型返回的整段 JSON（{"impression":"...","tags":[...]}）直接写进了
+ * impression 列。读的时候一律拆回「文字 + 标签」，不然看板和档案卡会把 JSON 原样显示出来。
+ */
+export function splitStoredImpression(raw, tagsRaw) {
+  const s = String(raw ?? '').trim()
+  let text = s
+  let tags = []
+  if (s.startsWith('{')) {
+    let parsed = null
+    try {
+      parsed = JSON.parse(s)
+    } catch {
+      /* 落到下面的正则兜底 */
+    }
+    if (parsed && typeof parsed.impression === 'string') {
+      text = parsed.impression
+      if (Array.isArray(parsed.tags)) tags = parsed.tags.filter((t) => typeof t === 'string')
+    } else {
+      const m = s.match(/"impression"\s*:\s*"([\s\S]*?)"\s*,\s*"tags"\s*:\s*(\[[\s\S]*?\])/)
+      if (m) {
+        text = m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n')
+        try {
+          const arr = JSON.parse(m[2])
+          if (Array.isArray(arr)) tags = arr.filter((t) => typeof t === 'string')
+        } catch {}
+      }
+    }
+  }
+  if (!tags.length && tagsRaw) {
+    try {
+      const arr = JSON.parse(tagsRaw)
+      if (Array.isArray(arr)) tags = arr.filter((t) => typeof t === 'string')
+    } catch {}
+  }
+  return { text, tags }
+}
+
 export function readImpression(db, userId) {
   const row = db.prepare('select impression, tags, impression_at, model from profiles where chat_key = ? and user_id = ?').get(IMPRESSION_KEY, String(userId))
   if (!row || !row.impression) return null
-  let tags = []
-  try {
-    tags = JSON.parse(row.tags || '[]')
-  } catch {
-    /* 坏数据当没标签 */
-  }
-  return { impression: row.impression, tags: Array.isArray(tags) ? tags : [], at: row.impression_at, model: row.model || '' }
+  const { text, tags } = splitStoredImpression(row.impression, row.tags)
+  return { impression: text, tags, at: row.impression_at, model: row.model || '' }
 }
 
 export async function generateImpression({ db, chatNames, userId, chatKey = null, llm, route, sample = 60, signal, onProgress }) {

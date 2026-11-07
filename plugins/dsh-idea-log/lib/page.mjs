@@ -66,6 +66,13 @@ input[type=text]:focus{border-color:var(--accent)}
   opacity:0;transition:opacity .2s}
 .note.on{opacity:1;color:var(--accent)}
 .note.bad{color:var(--red)}
+.done-hint{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;padding:8px 10px;
+  border:1px solid var(--accent);background:var(--accent-soft);border-radius:2px}
+.done-hint .done-text{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.04em;color:var(--accent)}
+.done-hint .act{color:var(--accent);border-color:var(--accent)}
+.done-hint .act:hover{color:var(--ink);background:transparent}
+.done-hint .act.yes{background:var(--accent);border-color:var(--accent);color:#171310}
+.done-hint .act.yes:hover{background:var(--accent);color:#171310;opacity:.9}
 .empty{color:var(--muted);font-family:var(--font-serif);font-style:italic;padding:60px 0;text-align:center}
 .foot{margin-top:64px;padding-top:22px;border-top:1px solid var(--line-subtle);
   font-family:var(--font-mono);font-size:10.5px;color:var(--muted);letter-spacing:.06em;line-height:2}
@@ -80,6 +87,7 @@ const START_HINT='在 DSH 里新开一个对话，把这条当成任务（只预
 let state={kind:'',status:'',q:''};
 let items=new Map();
 let waiting=null;
+let awaitingKey='__init';
 let noteTimer=null;
 const grid=document.getElementById('grid');
 const statsBox=document.getElementById('stats');
@@ -139,6 +147,11 @@ function cardHTML(it){
   const acts=STATUS.map(function(pair){
     return '<button class="act" data-id="'+it.id+'" data-status="'+pair[0]+'"'+(it.status===pair[0]?' data-on':'')+'>'+pair[1]+'</button>';
   }).join('');
+  const doneHint=it.awaitingDone
+    ? '<div class="done-hint"><span class="done-text">对话已结束 · 标为已做？</span>'+
+      '<button class="act yes" type="button" data-done="'+it.id+'">标为已做</button>'+
+      '<button class="act" type="button" data-dismiss="'+it.id+'">先不标</button></div>'
+    : '';
   return '<article class="card" data-kind="'+it.kind+'" data-id="'+it.id+'" data-status="'+it.status+'">'+
     '<div class="meta"><span class="kind">'+KIND_LABEL[it.kind]+'</span><span>'+fmt(it.createdAt)+'</span>'+
     (it.source==='digest'?'<span>· 自动提炼</span>':'')+'</div>'+
@@ -146,6 +159,7 @@ function cardHTML(it){
     (it.body?'<p>'+esc(it.body)+'</p>':'')+
     (tags?'<div class="tags">'+tags+'</div>':'')+
     '<div class="acts">'+goHTML(it)+acts+'</div>'+
+    doneHint+
   '</article>';
 }
 
@@ -166,7 +180,7 @@ async function load(){
 function bind(){
   grid.querySelectorAll('.card').forEach(function(card){
     card.addEventListener('click',function(e){
-      if(e.target.closest('.act')||e.target.closest('.go-wrap')) return;
+      if(e.target.closest('.act')||e.target.closest('.go-wrap')||e.target.closest('.done-hint')) return;
       card.classList.toggle('open');
     });
   });
@@ -184,7 +198,9 @@ function bind(){
         await api('api/update',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:Number(id),status:status})});
         const card=btn.closest('.card');
         const rec=items.get(Number(id));
-        if(rec) rec.status=status;
+        if(rec){rec.status=status;rec.awaitingDone=false}
+        const hint=card.querySelector('.done-hint');
+        if(hint) hint.remove();
         card.querySelectorAll('.act').forEach(function(b){b.removeAttribute('data-on')});
         btn.setAttribute('data-on','');
         card.setAttribute('data-status',status);
@@ -194,10 +210,38 @@ function bind(){
       }catch(err){showNote('没保存上：'+err.message,true)}
     });
   });
+  grid.querySelectorAll('[data-done]').forEach(function(btn){
+    btn.addEventListener('click',async function(e){
+      e.stopPropagation();
+      const id=Number(btn.getAttribute('data-done'));
+      btn.disabled=true;
+      try{
+        await api('api/done',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id})});
+        const rec=items.get(id);
+        if(rec){rec.status='done';rec.awaitingDone=false}
+        showNote('已标为已做。');
+        await load();
+      }catch(err){btn.disabled=false;showNote('没标上：'+err.message,true)}
+    });
+  });
+  grid.querySelectorAll('[data-dismiss]').forEach(function(btn){
+    btn.addEventListener('click',async function(e){
+      e.stopPropagation();
+      const id=Number(btn.getAttribute('data-dismiss'));
+      btn.disabled=true;
+      try{
+        await api('api/dismiss',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id})});
+        const rec=items.get(id);
+        if(rec) rec.awaitingDone=false;
+        showNote('先把提示收起来，继续孵化。');
+        await load();
+      }catch(err){btn.disabled=false;showNote('没收起：'+err.message,true)}
+    });
+  });
 }
 
 // 开工：把这条交给 DSH 网页半边去开新对话（只预填，不自动发送）。
-function start(btn){
+async function start(btn){
   const id=Number(btn.getAttribute('data-id'));
   const it=items.get(id);
   if(!it||!it.startPrompt){showNote('这条没有开工文案，刷新一下页面再试。',true);return}
@@ -215,6 +259,11 @@ function start(btn){
     syncGo(card,card?card.getAttribute('data-status'):'');
     showNote('DSH 那边没回话——插件可能刚更新，刷新页面再点一次。',true);
   },5000);
+  // 先告诉 Host「接下来的新对话是这条的」，让它能把对话和条目绑上。
+  // 这一步失败也照常开工（旧版 Host 没有这个接口，只是少了完成反馈）。
+  try{
+    await api('api/starting',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id})});
+  }catch(err){}
   window.parent.postMessage({type:START.request,id:id,prompt:it.startPrompt},location.origin);
 }
 
@@ -274,6 +323,16 @@ document.getElementById('q').addEventListener('input',function(e){
   clearTimeout(timer);
   timer=setTimeout(function(){state.q=e.target.value.trim();load()},260);
 });
+
+// 轮询「等确认」：孵化对话跑完一轮后，卡片上出现「标为已做？」。
+async function pollAwaiting(){
+  try{
+    const data=await api('api/awaiting');
+    const key=(data.ids||[]).slice().sort(function(a,b){return a-b}).join(',');
+    if(key!==awaitingKey){awaitingKey=key;await load()}
+  }catch(err){}
+}
+setInterval(pollAwaiting,10000);
 
 load();
 `

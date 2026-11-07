@@ -14,6 +14,7 @@ import {
   parseImpression,
   readImpression,
   saveImpression,
+  splitStoredImpression,
 } from '../lib/impression.mjs'
 import { isoDate } from '../lib/util.mjs'
 
@@ -173,4 +174,18 @@ test('dueForDaily：到点才跑、当天跑过不重复、增强层关着不跑
   } finally {
     close()
   }
+})
+
+
+test('splitStoredImpression：老数据里整段 JSON 会被拆回文字和标签', () => {
+  const a = splitStoredImpression('{"impression":"爱打牌的人","tags":["牌佬","夜猫子"]}')
+  assert.equal(a.text, '爱打牌的人')
+  assert.deepEqual(a.tags, ['牌佬', '夜猫子'])
+
+  const b = splitStoredImpression('{"impression":"句子 \"带引号\" 也没事","tags":["x"]}')
+  assert.equal(b.text, '句子 \"带引号\" 也没事')
+
+  const c = splitStoredImpression('普通的一句印象', '["标签A"]')
+  assert.equal(c.text, '普通的一句印象')
+  assert.deepEqual(c.tags, ['标签A'])
 })

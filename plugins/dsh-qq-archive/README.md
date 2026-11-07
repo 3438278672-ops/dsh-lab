@@ -113,16 +113,6 @@ dsh plugin install /path/to/dsh-qq-archive
 
 批注和收藏平时在 localStorage，点「导出存档」才会落成文件——那才是永久档。
 
-<p>
-  <img src="docs/dashboard-today.jpg" width="49%" alt="今日总结：每个群一张日报卡片">
-  <img src="docs/dashboard-board.jpg" width="49%" alt="探案板：照片是群友，红线是互相 @">
-</p>
-<p>
-  <img src="docs/dashboard-people.jpg" width="49%" alt="群友：发言数、人物印象与标签">
-</p>
-
-> 截图里是虚构的群、人和句子，用一份造数脚本灌进临时库再导出的，不是任何真实归档。
-
 ### 浏览页
 
 `qq_archive action=export` 会在插件家目录生成 `viewer.html`，双击就能看：
@@ -143,6 +133,16 @@ dsh plugin install /path/to/dsh-qq-archive
 - 桥那边的开关是 `config.json` 的 `socialV2.peopleCard`：`enabled`（默认 true）、`maxPeople`（默认 8）、`maxChars`（默认 1400）、`path`（默认 `~/.dsh/qq-archive/people.json`）；
 - 印象为空的人不会进这张卡，所以想让人被认出来，先跑 `qq_archive action=impressions`；
 - 改完 `people.json` 不用重启桥：桥按文件 mtime 缓存，下次唤醒自动重读。
+
+### 档案卡：群里问「你怎么看某某」
+
+QQ 里有人 @ 大肥鱼问「查查某某」「你觉得某某是个什么样的人」，桥接会调 `qq_person_card`，把那个人的档案卡渲染成一张图发到群里。
+
+- 卡片由本插件渲染：`/qq-archive/card?chat=group:123&who=昵称`（或 `&user=QQ号`）返回 PNG，服务端用本机 Edge/Chrome 无头截图，一张约 2~3 秒，同一个人 5 分钟内复用；
+- 内容就是看板里那张详情页：头像、发言数、人物印象、标签、24 小时活跃分布、常说的话、在哪些会话、@ 关系；
+- **只能查当前会话里的人**：`who` 只在该会话的成员里找；桥接那边还会用会话令牌校验 key，跨群既查不到也发不出去；
+- 重名会返回候选列表（409），让提问的人再确认一次；
+- 没生成过人物印象的人，卡片上会写「还没有人物印象」，先跑 `qq_archive action=impressions`。
 
 ## 配置
 
