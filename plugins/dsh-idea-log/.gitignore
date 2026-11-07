@@ -1,0 +1,8 @@
+node_modules/
+_data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+_page*.png
+_*.mjs

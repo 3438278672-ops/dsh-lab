@@ -2,7 +2,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai)（下称 DSH）写的插件与本地 MCP 服务合集。
 
-不是示例代码，也不是 demo：这七个项目都在一台 Windows 机器上真实跑着——群里有人点歌它真的会唱，发一张图它真的会去反查，Pixiv / B 站的 MCP 每天都在被智能体调用。这里放的是能在自己机器上复现的那部分源码。
+不是示例代码，也不是 demo：这九个项目都在一台 Windows 机器上真实跑着——群里有人点歌它真的会唱，发一张图它真的会去反查，三个月前的那句话也真的能翻出来，Pixiv / B 站的 MCP 每天都在被智能体调用。这里放的是能在自己机器上复现的那部分源码。
 
 > 2026 年 9–11 月，围绕「让智能体真的能干活」做的一批东西。
 
@@ -17,14 +17,16 @@
 | [dsh-qq-voice](plugins/dsh-qq-voice) | 让智能体用本机音色（GPT-SoVITS）发真正的 QQ 语音条 | GPT-SoVITS、qq-bridge 限流 |
 | [dsh-self-extend](plugins/dsh-self-extend) | 能力缺口 → 检索 6900+ 插件目录 → 直接安装或生成骨架 | 插件目录、plugin_manager |
 | [dsh-adb-phone](plugins/dsh-adb-phone) | 用 adb 操作一台真手机：截图 / UI 树 / 点击 / 输入 / 按键 / 应用 | adb、ADBKeyboard（中文输入） |
+| [dsh-qq-archive](plugins/dsh-qq-archive) | 把群聊历史落成本地索引：全文搜、群友档案、群聊日报、@ 关系看板、给 QQ 桥的熟人卡 | SQLite + 分词/单字倒排、只读源库、单文件看板 |
+| [dsh-idea-log](plugins/dsh-idea-log) | 干活时随手记插件点子 / 踩坑 / 改进点，每天半夜自动从会话里提炼，侧栏一面墙，点「开工」直接开新对话 | 多帧 zstd 解压、模型提炼去重、postMessage + `uiWorkspace.startSession` |
 | [mcp/pixiv-duty](mcp/pixiv-duty) | Pixiv App API 的 MCP：搜索 / 详情 / 下载 / 小说分段 / 校验 | pixivpy、FastMCP |
 | [mcp/bili-duty](mcp/bili-duty) | B 站 MCP 的加固分支：30 个工具，登录 / 搜索 / 评论 / 字幕 / 私信 / 投稿 | bilibili-api-python |
 
-七个项目、约 500 KB 源码、8 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）。
+九个项目、约 1 MB 源码、20 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）。
 
 ---
 
-## 三个设计故事
+## 五个设计故事
 
 ### 1. 点歌：按「静音」切，而不是按时间切
 
@@ -56,6 +58,24 @@ Pixiv 和 B 站这两个 MCP 都支持 `PIXIV_MCP_TOOLS` / `BILI_MCP_TOOLS` 环�
 
 同样统一的还有错误口径：任何失败都返回 `{ok:false, code, message}`，不向上抛协议异常，上层 JS 永远能拿到人话提示。以及——`stdout` 是 JSON-RPC 通道，所有调试输出必须走 `stderr` 或 `duty.log`。
 
+### 4. 中文搜索：为什么不用 FTS5 了事
+
+`dsh-qq-archive` 要在几万条群聊里搜「打牌」这种两个字的词。SQLite 的 FTS5 两条路都堵：`unicode61` 把整句当一个 token，搜词命中不了；`trigram` 要求至少三个字符，两个字直接无结果。而中文里最常搜的恰恰是两字词。
+
+所以索引是自己搭的**两层**：`Intl.Segmenter` 分词建一份倒排，再单独建一份**单字倒排**。查询按四级降级——原文连续子串（单字倒排，能搜到词典外的词）→ 分词 AND → 分词 OR（按词覆盖率过滤）→ 单关键词模糊。查不到就明说查不到，不拿「的」凑数。
+
+另外两个取舍：源库（SnowLuma 的 `messages.db`）**只读**，索引落在插件自己的 SQLite；媒体按 image / voice / video / forward / file / link 各是一个可过滤类型，而不是一串占位符——QQ 的图链带 rkey，大约一周就过期，所以只有同步之后新到的媒体能缓存，历史媒体标记失效、不反复重试。
+
+看板是另一件事：`dashboard.html` 单文件离线、双击就开，探案板上一张照片是一个人、一根红线是一次 @。红线最开始每对关系都画，图很快糊成一团；后来收敛成装饰——每人最多两根，剩下的信息挪到点开后的线索卡里。
+
+### 5. 一键开工：网页半边碰不到宿主服务
+
+灵感墙是一个 iframe 页面（`/idea-log/`），它想做的事却是「开一个新对话」——那是 DSH 网页主体的能力，同源不同窗，页面里拿不到。
+
+链路只能这么走：页面按钮 → `postMessage({type:'dsh-idea-log:start', id, prompt})` → 插件自己的网页半边 `lib/client.js` 收到后先验两件事（`e.origin === location.origin`、`e.source` 就是那个 iframe 的 `contentWindow`）→ 调 `uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'replace' })`，回 `started` / `start-failed`。5 秒没回执，页面自己提示「DSH 那边没回话」。
+
+几个刻意的决定：任务书由 **Host** 生成（`lib/start.mjs`，页面只是转交），这样「按类型该给什么指令」只有一处真相；**只预填、不自动发送**，人还能改；两侧的协议常量由 `tests/start.test.mjs` 检查，改一边忘了另一边会红。页面单独打开（没有父窗口）时退化成复制到剪贴板——不会假装成功。
+
 ---
 
 ## 一些数字
@@ -67,6 +87,8 @@ Pixiv 和 B 站这两个 MCP 都支持 `PIXIV_MCP_TOOLS` / `BILI_MCP_TOOLS` 环�
 | Pixiv MCP | App API 请求最小间隔 1.5 秒（账号级风控，token 被吊销不可恢复）；单次搜索 3 个查询 / 20 条 |
 | B 站 MCP | 30 个工具；凭证原子写；风控 -412 不再伪装成「0 条评论」 |
 | 插件目录 | 检索 6900+ 个 DSH 插件，标注本机已装状态 |
+| 群聊档案 | 3 万条历史约 7 秒建完索引；中文检索 4 级降级；看板单文件、红线每人最多两根 |
+| 灵感账本 | 每天 23:30 自动提炼一轮；24 小时同名去重；「开工」只预填不自动发送 |
 
 ---
 
@@ -116,7 +138,9 @@ dsh-lab/
 │  ├─ dsh-coser-fish/     # 以图找人（引擎内核 + 插件层 + 上游 CLI）
 │  ├─ dsh-qq-voice/       # 文字 → 本机音色语音条
 │  ├─ dsh-self-extend/    # 插件自扩展闭环
-│  └─ dsh-adb-phone/      # adb 手机控制
+│  ├─ dsh-adb-phone/      # adb 手机控制
+│  ├─ dsh-qq-archive/     # 群聊档案馆（搜索内核 + 档案 + 日报 + 看板 + 熟人卡）
+│  └─ dsh-idea-log/       # 灵感账本（随手记 + 每日提炼 + 灵感墙 + 一键开工）
 └─ mcp/
    ├─ pixiv-duty/         # Pixiv MCP（px_* 7 个工具）
    └─ bili-duty/          # B 站 MCP（bili_* 30 个工具）

@@ -1,0 +1,7 @@
+# dsh-qq-archive：QQ 群聊可检索记忆 + 人物档案
+# 配置留空 = 自动探测数据源、插件家目录默认 ~/.dsh/qq-archive。
+# 增强层（语音转写 / 图片描述 / 语义检索 / 人物印象）默认关，按需在 config 里打开。
+- insert:
+    - id: qq-archive
+      name: dsh-qq-archive
+      config: {}

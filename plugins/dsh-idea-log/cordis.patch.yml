@@ -1,0 +1,7 @@
+# dsh-idea-log：灵感账本
+# 数据默认在 ~/.dsh/idea-log/ideas.db；每天 23:30 自动从最近的 DSH 会话里提炼一次。
+# 托盘/侧栏入口是「灵感账本」，Host 端挂 /idea-log 前缀给页面用。
+- insert:
+    - id: idea-log
+      name: dsh-idea-log
+      config: {}

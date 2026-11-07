@@ -1,0 +1,44 @@
+{
+  "name": "dsh-qq-archive",
+  "version": "0.1.0",
+  "description": "把 QQ 群聊变成可检索的记忆和可查询的人物档案（qq_find / qq_people）",
+  "author": "3438278672-ops",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/3438278672-ops/dsh-qq-archive.git"
+  },
+  "homepage": "https://github.com/3438278672-ops/dsh-qq-archive#readme",
+  "bugs": {
+    "url": "https://github.com/3438278672-ops/dsh-qq-archive/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

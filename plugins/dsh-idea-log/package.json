@@ -1,0 +1,43 @@
+{
+  "name": "dsh-idea-log",
+  "version": "0.1.0",
+  "description": "灵感账本：把干活时冒出的插件点子、踩过的坑、改进点记下来，每天从会话里自动提炼一次，侧栏点开就是一面灵感墙。",
+  "author": "3438278672-ops",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/3438278672-ops/dsh-idea-log.git"
+  },
+  "homepage": "https://github.com/3438278672-ops/dsh-idea-log#readme",
+  "bugs": {
+    "url": "https://github.com/3438278672-ops/dsh-idea-log/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

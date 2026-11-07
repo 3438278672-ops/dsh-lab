@@ -29,3 +29,12 @@ __pycache__/
 *.unlimited-*
 .DS_Store
 Thumbs.db
+
+# 插件运行态（索引库、缓存、调试截图）
+**/data/
+*.db
+*.db-wal
+*.db-shm
+_page*.png
+_final-*.png
+node_modules/
