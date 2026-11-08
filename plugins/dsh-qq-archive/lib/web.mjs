@@ -5,7 +5,7 @@
 // 什么时候重建不靠计时器：每次请求先让 board 比对数据库指纹（~3 ms），对得上
 // 就直接发旧文件；对不上才在后台增量重建，这一屏仍然先给旧的，下次刷新就是新的。
 // 只有 dashboard.html 还不存在时才给「正在生成」等待页。
-import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { estimateHeight, personCardHtml, htmlToPng } from './card.mjs'
 
@@ -210,6 +210,29 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
       res.end(`渲染失败：${e?.message || 'unknown'}`)
     }
   }
+
+  // DSH 每次重启端口都可能变。把「现在从哪个地址能访问到这份档案」写到
+  // home/endpoint.json，桥接那边（qq_person_card）读它就不会再拿过期端口去 fetch。
+  // getOrigin() 在 listen 绑定之前会 throw，所以失败就隔一会儿再试。
+  const publishEndpoint = (tries = 0) => {
+    let origin = ''
+    try {
+      origin = ctx.webServer.getOrigin()
+    } catch {
+      if (tries < 20) setTimeout(() => publishEndpoint(tries + 1), 500).unref?.()
+      return
+    }
+    try {
+      writeFileSync(
+        join(home, 'endpoint.json'),
+        JSON.stringify({ origin, updatedAt: new Date().toISOString() }),
+        'utf8',
+      )
+    } catch {
+      // 写不进去也不影响网页本身，桥接那边会退回旧的 baseUrl
+    }
+  }
+  publishEndpoint()
 
   return ctx.effect(() =>
     ctx.webServer.register({

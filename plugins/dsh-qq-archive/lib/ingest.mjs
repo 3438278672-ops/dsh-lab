@@ -73,15 +73,23 @@ export async function syncFromAdapter({ archive, adapter, cfg, onProgress, full 
   return { scanned, inserted, mediaAdded, lastTs: cursor.ts, tookMs: Date.now() - startedAt }
 }
 
-/** 全局串行：同一时间只跑一个同步，调用方共享同一个 Promise。 */
+/** 全局串行：同一时间只跑一个同步，调用方共享同一个 Promise。
+ *  卡死的同步（读写锁、外部库被占用）五分钟后自动放弃，不然之后每一轮定时同步都会直接复用那个永不结算的 Promise，索引就永远停在那一天。 */
 let inflight = null
+const SYNC_TIMEOUT_MS = 5 * 60 * 1000
 
 export function syncOnce({ archive, adapter, cfg, onProgress, full = false }) {
   if (inflight) return inflight
+  let timer = null
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('这一轮同步超过 5 分钟还没结束，先放弃，下一轮再说')), SYNC_TIMEOUT_MS)
+    timer.unref?.()
+  })
   inflight = (async () => {
     try {
-      return syncFromAdapter({ archive, adapter, cfg, onProgress, full })
+      return await Promise.race([syncFromAdapter({ archive, adapter, cfg, onProgress, full }), guard])
     } finally {
+      if (timer) clearTimeout(timer)
       inflight = null
     }
   })()
