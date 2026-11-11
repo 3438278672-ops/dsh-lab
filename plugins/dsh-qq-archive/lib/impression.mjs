@@ -9,7 +9,7 @@
  */
 import { isoDate, stamp, truncate } from './util.mjs'
 import { buildProfile } from './people.mjs'
-import { listRoutes, pickRoute, streamText } from './llm.mjs'
+import { listRoutes, pickRoute, generateText } from './llm.mjs'
 import { getMeta } from './db.mjs'
 
 export const IMPRESSION_KEY = '*'
@@ -188,13 +188,14 @@ export async function generateImpression({ db, chatNames, userId, chatKey = null
   const mentions = collectMentions(db, userId, chatKey, 12)
   const prompt = renderPrompt(profile, samples, mentions, chatNames)
   onProgress?.({ phase: 'calling', userId, promptChars: prompt.length })
-  const { text, usage } = await streamText(llm, {
+  const { text, usage } = await generateText(llm, {
     provider: route.provider,
     model: route.model,
     system: SYSTEM_PROMPT,
     prompt,
     temperature: 0.6,
     maxTokens: 900,
+    attempts: 3,
     signal,
   })
   const parsed = parseImpression(text)

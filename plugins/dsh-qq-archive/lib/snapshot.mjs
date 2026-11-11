@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, openSync, closeSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export const CACHE_VERSION = 1
+export const CACHE_VERSION = 3
 export const CACHE_FILE = 'dashboard.cache.json'
 export const HTML_FILE = 'dashboard.html'
 
@@ -26,6 +26,9 @@ export function dbFingerprint(db) {
   const md = db.prepare('select count(*) c, max(id) mx from media').get()
   const pr = db.prepare('select count(*) c, max(impression_at) at, sum(length(impression)) n from profiles').get()
   const rp = db.prepare('select count(*) c, max(created_at) at, sum(length(text)) n from reports').get()
+  // 名场面摘要与周期报告会进看板，它们变了也要重建。
+  const hl = db.prepare('select count(*) c, max(created_at) at, sum(length(summary)) n from highlights').get()
+  const pd = db.prepare('select count(*) c, max(created_at) at, sum(length(text)) n from period_reports').get()
   const ch = db.prepare('select count(*) c, sum(msg_count) n, max(last_ts) lt from chats').get()
   const names = db.prepare('select chat_key, name from chats order by chat_key').all()
   const nameHash = createHash('sha1')
@@ -37,6 +40,8 @@ export function dbFingerprint(db) {
     md.c, md.mx || 0,
     pr.c, pr.at || 0, pr.n || 0,
     rp.c, rp.at || 0, rp.n || 0,
+    hl.c, hl.at || 0, hl.n || 0,
+    pd.c, pd.at || 0, pd.n || 0,
     ch.c, ch.n || 0, ch.lt || 0,
     nameHash,
   ].join('|')

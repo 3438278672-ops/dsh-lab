@@ -47,6 +47,21 @@ export const DEFAULTS = {
     schedule: '00:30',
     maxChats: 12,
   },
+  // 日报主动送达：日报写完后私聊给主人（总开关默认关，在群里让 DSH 打开即可）
+  // 实际是否发送还会被 DB meta 里的 push_enabled 覆盖（action=push 改的就是它）
+  push: {
+    enabled: false,
+    // 收件人：private:<QQ号> 或纯 QQ 号；空 = 自动取本机桥接白名单里的第一个私聊号
+    target: '',
+    // qq-bridge 控制台地址；token 空则从 tokenFile 读，再不行自动探测桥接 state/console-token
+    baseUrl: 'http://127.0.0.1:3100',
+    token: '',
+    tokenFile: '',
+    // 自动探测本机 qq-bridge（config.json 的 consolePort/allow.private + state/console-token）
+    discover: true,
+    // digest = 只推「所有会话」的汇总日报；all = 每个群各推一份（较吵）
+    scope: 'digest',
+  },
 }
 
 export function mergeConfig(config) {

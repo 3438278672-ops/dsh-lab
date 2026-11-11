@@ -12,16 +12,22 @@ function chatFilter(chatKey) {
 }
 
 /**
+ * @param {object} opts
+ * @param {string|null} opts.chatKey 只看某个会话
+ * @param {number} opts.sinceTs 起始时间（秒，含）
+ * @param {number} opts.toTs 结束时间（秒，不含；0 = 无限）
  * @returns {{nodes: {id,name,count,out,in}[], edges: {source,target,count}[], totalAt}}
  */
-export function buildGraph(db, { chatKey = null, sinceTs = 0, maxNodes = 80 } = {}) {
+export function buildGraph(db, { chatKey = null, sinceTs = 0, toTs = 0, maxNodes = 80 } = {}) {
   const f = chatFilter(chatKey)
+  const timeSql = toTs ? ' and ts < ?' : ''
+  const timeArgs = toTs ? [toTs] : []
   const rows = db
     .prepare(
       `select sender_id, sender_name, raw from messages
-        where raw like '%"at"%' and sender_id <> '' and ts >= ?${f.sql}`,
+        where raw like '%"at"%' and sender_id <> '' and ts >= ?${timeSql}${f.sql}`,
     )
-    .all(sinceTs, ...f.args)
+    .all(sinceTs, ...timeArgs, ...f.args)
 
   const edgeCount = new Map()
   const outCount = new Map()
@@ -43,8 +49,8 @@ export function buildGraph(db, { chatKey = null, sinceTs = 0, maxNodes = 80 } = 
 
   const msgCount = new Map()
   for (const r of db
-    .prepare(`select sender_id as id, count(*) c from messages where sender_id <> '' and ts >= ?${f.sql} group by sender_id`)
-    .all(sinceTs, ...f.args)) {
+    .prepare(`select sender_id as id, count(*) c from messages where sender_id <> '' and ts >= ?${timeSql}${f.sql} group by sender_id`)
+    .all(sinceTs, ...timeArgs, ...f.args)) {
     msgCount.set(String(r.id), r.c)
   }
 

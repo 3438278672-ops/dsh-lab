@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-archive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "把 QQ 群聊变成可检索的记忆和可查询的人物档案（qq_find / qq_people）",
   "author": "3438278672-ops",
   "repository": {

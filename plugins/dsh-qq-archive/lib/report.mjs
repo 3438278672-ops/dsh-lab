@@ -27,7 +27,8 @@ export function dayBounds(day = 'today', now = Date.now()) {
   return { day: fmtDay(d), fromTs: Math.floor(d.getTime() / 1000), toTs: Math.floor(d.getTime() / 1000) + 86400 - 1 }
 }
 
-function fmtDay(d) {
+/** Date → 'YYYY-MM-DD'（本地时区）。看板要按同一套日期口径生成「最近 N 天」窗口。 */
+export function fmtDay(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 

@@ -8,6 +8,12 @@
 import { createReadStream, existsSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { estimateHeight, personCardHtml, htmlToPng } from './card.mjs'
+import { buildGraph } from './graph.mjs'
+import { graphRangeBounds } from './graphrange.mjs'
+import { dayBreakdown } from './calendar.mjs'
+import { investigateTopic } from './topics.mjs'
+import { buildLinkIndex, filterLinks } from './links.mjs'
+import { applyPushUpdate, effectivePushSettings, pushReport, pushStatus, recordPushResult } from './push.mjs'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -77,6 +83,96 @@ function notFound(res) {
   res.end('not found')
 }
 
+const CHAT_KEY_RE = /^(?:group|private):\d+$/
+
+function queryOf(req) {
+  try {
+    return new URL(req.url || '/', 'http://x').searchParams
+  } catch {
+    return null
+  }
+}
+
+function sendJson(req, res, value, status = 200) {
+  let body
+  try {
+    body = Buffer.from(JSON.stringify(value))
+  } catch {
+    body = Buffer.from('{"error":"序列化失败"}')
+    status = 500
+  }
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': body.length,
+    'cache-control': 'no-store',
+  })
+  if (req.method === 'HEAD') return res.end()
+  res.end(body)
+}
+
+function nullableChat(raw) {
+  const s = String(raw || '').trim()
+  if (!s) return null
+  // 看板内部用 '*' 表示「所有会话」，API 也接受这个写法
+  if (s === '*') return null
+  return CHAT_KEY_RE.test(s) ? s : null
+}
+
+function parseTs(raw) {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+}
+
+function parseDay(raw) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(raw || '')) ? String(raw) : ''
+}
+
+function clampLimit(raw, def, max = 500) {
+  const n = Math.floor(Number(raw))
+  return Number.isFinite(n) && n > 0 ? Math.min(n, max) : def
+}
+
+/** 读一小段 JSON 请求体（开关 / 范围 / 测试按钮都用它）；超限或不合法就拒绝。 */
+function readJsonBody(req, limit = 8192) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    let done = false
+    const fail = (err) => {
+      if (done) return
+      done = true
+      reject(err)
+    }
+    req.on('data', (chunk) => {
+      if (done) return
+      size += chunk.length
+      if (size > limit) {
+        fail(new Error('请求体太大'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (done) return
+      done = true
+      if (!chunks.length) return resolve({})
+      try {
+        const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        resolve(value && typeof value === 'object' && !Array.isArray(value) ? value : {})
+      } catch {
+        reject(new Error('请求体不是 JSON'))
+      }
+    })
+    req.on('error', fail)
+  })
+}
+
+/** 本地时区的今天，给测试消息抬头用。 */
+function todayLabel(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+
 // 只允许读 home 目录底下的文件
 function safeFile(root, rel) {
   const base = normalize(root)
@@ -96,8 +192,12 @@ function safeFile(root, rel) {
  *   board 由 index.js 创建并在同步 / 日报 / 印象写库后预热，网页这边只是问它
  *   「现在这份还算新吗」。
  */
-export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFor, lookupInChat } = {}) {
+export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFor, lookupInChat, getDb, getArchive, cfg = {} } = {}) {
   const dashboardFile = () => join(home, 'dashboard.html')
+  const requireDb = () => {
+    if (!getDb) throw new Error('数据库还没接上')
+    return getDb()
+  }
 
   if (!board) log('看板构建器没接进来：网页只读旧文件，不会重建')
 
@@ -115,6 +215,61 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
     }
   }
 
+  // 推送开关：看板「群总结」页上的开关走这两条接口。
+  const pushGet = (req, res) => {
+    try {
+      return sendJson(req, res, pushStatus(requireDb(), cfg))
+    } catch (e) {
+      return sendJson(req, res, { error: e?.message || '数据库不可用' }, 503)
+    }
+  }
+
+  // 测试消息 5 秒内只许发一条，避免连点刷屏（这是真发到 QQ 上的）
+  let lastTestAt = 0
+  const pushPost = async (req, res) => {
+    let body
+    try {
+      body = await readJsonBody(req)
+    } catch (e) {
+      return sendJson(req, res, { error: e?.message || '请求体不合法' }, 400)
+    }
+    let db
+    try {
+      db = requireDb()
+    } catch (e) {
+      return sendJson(req, res, { error: e?.message || '数据库不可用' }, 503)
+    }
+
+    // { test: true }：按当前目标真发一条，链路通不通当场知道
+    if (body.test === true) {
+      const now = Date.now()
+      if (now - lastTestAt < 5000) return sendJson(req, res, { error: '测试消息 5 秒内只能发一条' }, 429)
+      lastTestAt = now
+      try {
+        const eff = effectivePushSettings(db, cfg)
+        const result = await pushReport(cfg, {
+          date: todayLabel(),
+          chatName: '群聊档案馆',
+          text: '这条是推送测试：能看到它，说明「日报主动送达」已经通了。',
+          target: eff.target,
+        })
+        recordPushResult(db, {
+          ok: result.ok,
+          text: result.ok ? `测试消息 → ${result.target}` : result.error,
+        })
+        return sendJson(req, res, { ok: result.ok, test: result, settings: pushStatus(db, cfg) })
+      } catch (e) {
+        return sendJson(req, res, { error: e?.message || '测试发送失败' }, 500)
+      }
+    }
+
+    try {
+      return sendJson(req, res, { ok: true, settings: applyPushUpdate(db, cfg, body) })
+    } catch (e) {
+      return sendJson(req, res, { error: e?.message || '设置不合法' }, 400)
+    }
+  }
+
   // /card?chat=group:123&user=456 或 &who=昵称 → 一张 PNG 档案卡
   const serveCard = async (req, res) => {
     if (!profileFor) {
@@ -124,11 +279,13 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
     let chat = ''
     let user = ''
     let who = ''
+    let format = 'png'
     try {
       const u = new URL(req.url || '/', 'http://x')
       chat = u.searchParams.get('chat') || ''
       user = (u.searchParams.get('user') || '').trim()
       who = (u.searchParams.get('who') || '').trim()
+      if (u.searchParams.get('format') === 'html') format = 'html'
     } catch {
       return notFound(res)
     }
@@ -195,6 +352,16 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
 
     try {
       const html = personCardHtml(data.profile, data.meta || {})
+      if (format === 'html') {
+        const body = Buffer.from(html, 'utf8')
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-disposition': `attachment; filename="qq-card-${user}.html"`,
+          'content-length': body.length,
+          'cache-control': 'no-store',
+        })
+        return res.end(body)
+      }
       const png = htmlToPng(html, { height: estimateHeight(data.profile) })
       cardCache.set(key, { at: Date.now(), png })
       if (cardCache.size > 40) cardCache.delete(cardCache.keys().next().value)
@@ -239,7 +406,8 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
       kind: 'prefix',
       path: BASE,
       handler(req, res) {
-        if (req.method !== 'GET' && req.method !== 'HEAD') return notFound(res)
+        const isGet = req.method === 'GET' || req.method === 'HEAD'
+        if (!isGet && req.method !== 'POST') return notFound(res)
         // 只接受同源请求：别的网页不能拿这个前缀读群聊
         const origin = req.headers.origin
         if (origin) {
@@ -260,6 +428,14 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
           return notFound(res)
         }
 
+        // 推送开关：GET 读状态，POST 改开关 / 换范围 / 发测试消息。整站唯一的写接口。
+        if (rest === '/api/push') {
+          if (req.method === 'POST') return void pushPost(req, res)
+          return pushGet(req, res)
+        }
+        // 其他写请求一律不接
+        if (!isGet) return notFound(res)
+
         // 看板首页
         if (rest === '/' || rest === '/index.html') {
           const file = dashboardFile()
@@ -277,6 +453,80 @@ export function registerArchiveWeb(ctx, { home, log = () => {}, board, profileFo
         if (m) {
           const f = safeFile(join(home, 'media'), m[1])
           return f ? sendFile(req, res, f) : notFound(res)
+        }
+
+        // 只读 JSON API：日历点开某天、群梗搜词、关系图换时间范围、资源库检索
+        if (rest.startsWith('/api/')) {
+          const q = queryOf(req)
+          if (!q) return notFound(res)
+
+          // 参数先统一校验，越界的一律 400，别把 SQL 参数拼进字符串
+          const chatRaw = String(q.get('chat') || '').trim()
+          const chat = nullableChat(chatRaw)
+          if (chatRaw && chatRaw !== '*' && !chat) return sendJson(req, res, { error: 'chat 不合法' }, 400)
+
+          let archive
+          try {
+            archive = getArchive ? getArchive() : { db: requireDb() }
+          } catch (e) {
+            return sendJson(req, res, { error: e?.message || '数据库不可用' }, 503)
+          }
+
+          try {
+            if (rest === '/api/day') {
+              const date = parseDay(q.get('date'))
+              if (!date) return sendJson(req, res, { error: 'date 要 YYYY-MM-DD' }, 400)
+              return sendJson(req, res, dayBreakdown(archive.db, { date, chatKey: chat }))
+            }
+
+            if (rest === '/api/topic') {
+              const word = String(q.get('word') || '').trim()
+              if (!word) return sendJson(req, res, { error: 'word 必填' }, 400)
+              return sendJson(
+                req,
+                res,
+                investigateTopic(archive, {
+                  word,
+                  chatKey: chat,
+                  fromTs: parseTs(q.get('from')),
+                  toTs: parseTs(q.get('to')),
+                  limit: clampLimit(q.get('limit'), 80),
+                }),
+              )
+            }
+
+            if (rest === '/api/graph') {
+              const bounds = graphRangeBounds(String(q.get('range') || 'all'))
+              const graph = buildGraph(archive.db, {
+                chatKey: chat,
+                sinceTs: bounds.fromTs,
+                toTs: bounds.toTs,
+                maxNodes: 70,
+              })
+              return sendJson(req, res, { ...bounds, graph })
+            }
+
+            if (rest === '/api/links') {
+              const index = buildLinkIndex(archive.db, { chatKey: null, limit: 4000 })
+              const links = filterLinks(index, {
+                q: String(q.get('q') || '').trim(),
+                domain: String(q.get('domain') || '').trim(),
+                chatKey: chat || '',
+                limit: clampLimit(q.get('limit'), 200),
+              })
+              return sendJson(req, res, {
+                total: index.total,
+                filtered: links.length,
+                domains: index.domains,
+                byChat: index.byChat,
+                links,
+              })
+            }
+          } catch (e) {
+            log(`api ${rest} 失败：${e?.message || e}`)
+            return sendJson(req, res, { error: String(e?.message || e) }, 500)
+          }
+          return notFound(res)
         }
 
         // 档案卡：/qq-archive/card?chat=group:123&user=456 → PNG

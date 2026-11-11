@@ -112,6 +112,33 @@ create table if not exists reports(
   created_at integer not null default 0,
   primary key(date, chat_key)
 );
+
+-- 名场面（爆聊窗口 + 模型摘要）。同一段窗口只存一份，force 时覆盖。
+create table if not exists highlights(
+  id integer primary key autoincrement,
+  chat_key text not null,
+  from_ts integer not null,
+  to_ts integer not null,
+  msg_count integer not null default 0,
+  stats text,
+  summary text,
+  model text,
+  created_at integer not null default 0,
+  unique(chat_key, from_ts, to_ts)
+);
+
+-- 周报 / 月报。range 由 kind + from_date 唯一确定，to_date 跟着算。
+create table if not exists period_reports(
+  kind text not null,
+  from_date text not null,
+  to_date text not null,
+  chat_key text not null,
+  text text,
+  stats text,
+  model text,
+  created_at integer not null default 0,
+  primary key(kind, from_date, chat_key)
+);
 `
 
 function tryExec(db, sql) {

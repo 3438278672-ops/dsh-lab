@@ -103,6 +103,16 @@ test('buildReport 统计 + 高频词剥占位 + 采样', async () => {
     })
     assert.equal(readReport(archive.db, { date: today.day, chatKey: 'group:123' }).text, '改过了')
 
+    // 昨天也留一份，验证看板「按天翻」是把最近几天一起带上、且新的在前
+    const yday = dayBounds('yesterday', now)
+    saveReport(archive.db, {
+      date: yday.day,
+      chatKey: 'group:123',
+      text: '昨天的总结',
+      stats: { total: 3, members: [], topWords: [], links: [] },
+      model: 'fake/model',
+    })
+
     // 关系图：@ 边
     const at = [{ type: 'at', data: { qq: '222' } }, { type: 'text', data: { text: ' 来打牌' } }]
     insertBatch(archive.db, archive, [
@@ -121,8 +131,16 @@ test('buildReport 统计 + 高频词剥占位 + 采样', async () => {
     // 看板数据与 HTML
     const data = buildDashboardData(archive.db, { home, feedLimit: 50 })
     assert.ok(data.chats.length >= 1)
-    const card = data.reportCards.find((c) => c.chatKey === 'group:123')
-    assert.ok(card && card.today.text === '改过了')
+    // 群总结：按天归档，最新在前，只收真有日报的日子
+    assert.ok(data.reportDays.length >= 2)
+    assert.ok(data.reportDays.length <= 7)
+    assert.equal(data.reportDays[0].date, today.day)
+    assert.ok(data.reportDays.some((d) => d.date === yday.day))
+    assert.ok(data.reportDays.every((d) => d.cards.length > 0))
+    const dayToday = data.reportDays.find((d) => d.date === today.day)
+    const card = dayToday.cards.find((c) => c.chatKey === 'group:123')
+    assert.ok(card && card.text === '改过了')
+    assert.equal(dayToday.cards[0].chatKey, 'group:123')
     assert.ok(data.feed.length >= 1)
     assert.ok(data.graph.nodes.length >= 2)
     // 群友档案：按发言量聚合，带上印象字段（没生成过就是空串）
@@ -140,6 +158,8 @@ test('buildReport 统计 + 高频词剥占位 + 采样', async () => {
     const html = renderDashboard(data, { title: '测试档案馆' })
     assert.match(html, /测试档案馆/)
     assert.match(html, /application\/json/)
+    assert.match(html, /群总结/) // 标签与分组标题
+    assert.match(html, /id="day-rail"/)
     assert.ok(!html.includes('</script><script>'))
   } finally {
     archive.db.close()

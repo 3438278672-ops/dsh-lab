@@ -17,12 +17,12 @@
 | [dsh-qq-voice](plugins/dsh-qq-voice) | 让智能体用本机音色（GPT-SoVITS）发真正的 QQ 语音条 | GPT-SoVITS、qq-bridge 限流 |
 | [dsh-self-extend](plugins/dsh-self-extend) | 能力缺口 → 检索 6900+ 插件目录 → 直接安装或生成骨架 | 插件目录、plugin_manager |
 | [dsh-adb-phone](plugins/dsh-adb-phone) | 用 adb 操作一台真手机：截图 / UI 树 / 点击 / 输入 / 按键 / 应用 | adb、ADBKeyboard（中文输入） |
-| [dsh-qq-archive](plugins/dsh-qq-archive) | 把群聊历史落成本地索引：全文搜、群友档案、群聊日报、@ 关系看板、给 QQ 桥的熟人卡、群里问「你怎么看他」直接发档案卡 | SQLite + 分词/单字倒排、只读源库、单文件看板、headless 截图 |
+| [dsh-qq-archive](plugins/dsh-qq-archive) | 把群聊历史落成本地索引：全文搜、群友档案、群聊日报/周报/月报、@ 关系看板、自然语言问答、活跃日历、链接资源库、群梗考古、名场面、活跃榜、日报主动推送、给 QQ 桥的熟人卡 | SQLite + 分词/单字倒排、只读源库、单文件看板、在线查询 API、headless 截图 |
 | [dsh-idea-log](plugins/dsh-idea-log) | 干活时随手记插件点子 / 踩坑 / 改进点，每天半夜自动从会话里提炼，侧栏一面墙，点「开工」直接开新对话 | 多帧 zstd 解压、模型提炼去重、postMessage + `uiWorkspace.startSession` |
 | [mcp/pixiv-duty](mcp/pixiv-duty) | Pixiv App API 的 MCP：搜索 / 详情 / 下载 / 小说分段 / 校验 | pixivpy、FastMCP |
 | [mcp/bili-duty](mcp/bili-duty) | B 站 MCP 的加固分支：30 个工具，登录 / 搜索 / 评论 / 字幕 / 私信 / 投稿 | bilibili-api-python |
 
-九个项目、约 1 MB 源码、20 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）。
+九个项目、约 1.3 MB 源码、33 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）。
 
 ---
 
@@ -30,14 +30,19 @@
 
 两个插件会自己画页面。截图都是用假数据跑的，细节在各自的 README 里。
 
-**群聊档案馆**（`qq_archive action=dashboard` 生成的单文件看板）：
+**群聊档案馆**（`qq_archive action=dashboard` 生成的单文件看板，10 个栏目）：
 
 <p>
-  <img src="plugins/dsh-qq-archive/docs/dashboard-today.jpg" width="49%" alt="今日总结：每个群一张日报卡片">
-  <img src="plugins/dsh-qq-archive/docs/dashboard-board.jpg" width="49%" alt="探案板：照片是群友，红线是互相 @">
+  <img src="plugins/dsh-qq-archive/docs/dashboard-today.jpg" width="49%" alt="群总结：最近 7 天日报按天翻，顶部是日报主动送达开关">
+  <img src="plugins/dsh-qq-archive/docs/dashboard-board.jpg" width="49%" alt="探案板：照片是群友，红线是互相 @，可切本周 / 上周 / 本月">
 </p>
 <p>
   <img src="plugins/dsh-qq-archive/docs/dashboard-people.jpg" width="49%" alt="群友：发言数、人物印象与标签">
+  <img src="plugins/dsh-qq-archive/docs/dashboard-calendar.jpg" width="49%" alt="日历：近三个月活跃热力图，点一天看当天明细">
+</p>
+<p>
+  <img src="plugins/dsh-qq-archive/docs/dashboard-links.jpg" width="49%" alt="资源库：群里发过的链接按域名收编，可搜可导出">
+  <img src="plugins/dsh-qq-archive/docs/dashboard-highlights.jpg" width="49%" alt="名场面：爆聊时段 + 模型摘要">
 </p>
 
 **灵感账本**（DSH 侧栏里打开的灵感墙）：
@@ -165,7 +170,7 @@ dsh-lab/
 │  ├─ dsh-qq-voice/       # 文字 → 本机音色语音条
 │  ├─ dsh-self-extend/    # 插件自扩展闭环
 │  ├─ dsh-adb-phone/      # adb 手机控制
-│  ├─ dsh-qq-archive/     # 群聊档案馆（搜索内核 + 档案 + 日报 + 看板 + 熟人卡）
+│  ├─ dsh-qq-archive/     # 群聊档案馆（搜索内核 + 档案 + 日报/周报 + 看板 + 问答/日历/资源库 + 熟人卡）
 │  └─ dsh-idea-log/       # 灵感账本（随手记 + 每日提炼 + 灵感墙 + 一键开工）
 └─ mcp/
    ├─ pixiv-duty/         # Pixiv MCP（px_* 7 个工具）
