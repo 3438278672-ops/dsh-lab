@@ -27,6 +27,19 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 
 ![DeepSeek-Chan](docs/samples/deepseek-chan_832x1216.jpg)
 
+## 画点名角色：先查 P 站对齐标签
+
+用户点名一个具体角色（中文名、日文名、外号都行）时，先查 pixiv 再画，避免把角色画错：
+
+1. `px_search`（pixiv MCP 工具，`kind=illust`，`queries` 填角色名；中文名直接搜，搜不到换日文/英文；`minBookmarks` 200–500 够用）
+2. 读返回的 `tags`——里面通常同时有作品名（`translated` 字段，如 `明日方舟` → `Arknights`）、角色名（如 `提丰` → `Typhon`）和外观词（`白髪` → white hair）
+3. 拼出 SDXL 认的 danbooru 角色标签 `name (series)`（如 `typhon (arknights)`、`frieren (sousou no frieren)`），再挑 3–6 个外观 tag（发色/瞳色/服装/标志性配件）
+4. 动作/表情/构图照常写，交给 `draw_image`
+
+`px_detail` 能看单张作品的完整标签；`px_fetch` 可以下载原图，主会话里用 `read_image` 看一眼确认长相。
+拿不准（同名角色多、名字是外号、搜索结果对不上）时，把 1 张参照图发到会话问一句「是这个角色吗」再画；搜不到就按已知的画，并顺口说明可能不太准。
+搜到的 R-18 / 癖好标签不要写进 prompt；画自己/大肥鱼走固定人设，不查 P 站。
+
 ## 特性
 
 | 能力 | 说明 |
@@ -39,6 +52,7 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | 默认负面词 | 质量词 + 手部/肢体硬约束始终生效：`bad hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, extra limbs, bad proportions …`；自定义 negative 只能**追加**，不能替换 |
 | 限流 | 跟唱歌插件一个规矩：一个人 60 分钟只能请求画一次（`requester` 记 QQ 号），vip 名单（默认 `2220222310`）不限；生成失败会自动退还名额 |
 | R18 硬闸 | 每张图带 rating sidecar，发送时由 qq-bridge 的 r18-guard 判定，群聊默认发不出去 |
+| 点名角色 | 先查 pixiv 对齐「角色名 (作品名)」与外观标签再画（见上节），减少把角色画错 |
 
 ## 环境要求
 

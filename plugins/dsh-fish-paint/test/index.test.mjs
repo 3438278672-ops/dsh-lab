@@ -77,7 +77,7 @@ test('导出约定与注册：4 个工具 + fish-paint 提示词 section', () =>
     assert.equal(sections.length, 1)
     assert.equal(sections[0].name, 'fish-paint')
     assert.equal(sections[0].order, 900)
-    for (const keyword of ['draw_image', 'draw_status', 'draw_setup', 'draw_recent', 'R18', 'sticker', 'danbooru']) {
+    for (const keyword of ['draw_image', 'draw_status', 'draw_setup', 'draw_recent', 'R18', 'sticker', 'danbooru', 'px_search', 'P 站']) {
       assert.ok(sections[0].text.includes(keyword), `systemPrompt 应提到 ${keyword}`)
     }
   } finally {
