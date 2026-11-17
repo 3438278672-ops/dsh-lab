@@ -1,0 +1,14 @@
+# 鱼鱼画画（dsh-fish-paint）· Python 引擎依赖
+# 目标环境：Windows x64 / Python 3.12 / RTX 3070 8G（驱动 616.92）/ CUDA 12.4 runtime
+#
+# torch 走交大镜像的 cu124 wheel（实测 ~53MB/s，比 PyPI 快得多）。
+# setup.mjs 会先自己下载这一行指向的 wheel（便于进度显示 + 断点续传），再 pip 安装；
+# 直接 `pip install -r requirements.txt` 也能用（只是没有续传）。
+torch @ https://mirror.sjtu.edu.cn/pytorch-wheels/cu124/torch-2.6.0%2Bcu124-cp312-cp312-win_amd64.whl
+
+# 以下从阿里云 PyPI 镜像安装（实测 ~1MB/s）
+diffusers==0.35.0
+transformers==4.49.0
+accelerate==1.2.1
+safetensors==0.5.2
+pillow==11.1.0

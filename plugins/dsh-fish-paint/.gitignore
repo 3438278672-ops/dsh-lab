@@ -1,0 +1,10 @@
+# 模型、venv、出图与状态都在 data/ 下，绝不入库
+data/
+node_modules/
+*.log
+*.part
+*.tmp
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

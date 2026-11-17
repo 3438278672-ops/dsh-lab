@@ -1,0 +1,42 @@
+{
+  "name": "dsh-fish-paint",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "鱼鱼画画：内置轻量 SDXL 出图引擎（diffusers 常驻 worker），把自然语言要求变成二次元插画/表情包，存本地并可发到 QQ 会话",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/3438278672-ops/dsh-lab.git",
+    "directory": "plugins/dsh-fish-paint"
+  },
+  "homepage": "https://github.com/3438278672-ops/dsh-lab/tree/main/plugins/dsh-fish-paint",
+  "exports": {
+    ".": "./index.js",
+    "./icon": "./icon.svg",
+    "./icon.svg": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "lib",
+    "engine",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

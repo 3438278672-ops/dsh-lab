@@ -2,7 +2,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai)（下称 DSH）写的插件与本地 MCP 服务合集。
 
-不是示例代码，也不是 demo：这九个项目都在一台 Windows 机器上真实跑着——群里有人点歌它真的会唱，发一张图它真的会去反查，三个月前的那句话也真的能翻出来，Pixiv / B 站的 MCP 每天都在被智能体调用。这里放的是能在自己机器上复现的那部分源码。
+不是示例代码，也不是 demo：这十个项目都在一台 Windows 机器上真实跑着——群里有人点歌它真的会唱，发一张图它真的会去反查，说一句「画个……」它真的会在本机显卡上画出图，三个月前的那句话也真的能翻出来，Pixiv / B 站的 MCP 每天都在被智能体调用。这里放的是能在自己机器上复现的那部分源码。
 
 > 2026 年 9–11 月，围绕「让智能体真的能干活」做的一批东西。
 
@@ -19,10 +19,11 @@
 | [dsh-adb-phone](plugins/dsh-adb-phone) | 用 adb 操作一台真手机：截图 / UI 树 / 点击 / 输入 / 按键 / 应用 | adb、ADBKeyboard（中文输入） |
 | [dsh-qq-archive](plugins/dsh-qq-archive) | 把群聊历史落成本地索引：全文搜、群友档案、群聊日报/周报/月报、@ 关系看板、自然语言问答、活跃日历、链接资源库、群梗考古、名场面、活跃榜、日报主动推送、给 QQ 桥的熟人卡 | SQLite + 分词/单字倒排、只读源库、单文件看板、在线查询 API、headless 截图 |
 | [dsh-idea-log](plugins/dsh-idea-log) | 干活时随手记插件点子 / 踩坑 / 改进点，每天半夜自动从会话里提炼，侧栏一面墙，点「开工」直接开新对话 | 多帧 zstd 解压、模型提炼去重、postMessage + `uiWorkspace.startSession` |
+| [dsh-fish-paint](plugins/dsh-fish-paint) | 一句自然语言 → 本机 SDXL 出二次元插画 / 表情包，落盘存元数据，要的话直接发 QQ | diffusers 常驻 worker、Illustrious-XL-v2.0、rating sidecar 硬闸、qq-bridge 投递 |
 | [mcp/pixiv-duty](mcp/pixiv-duty) | Pixiv App API 的 MCP：搜索 / 详情 / 下载 / 小说分段 / 校验 | pixivpy、FastMCP |
 | [mcp/bili-duty](mcp/bili-duty) | B 站 MCP 的加固分支：30 个工具，登录 / 搜索 / 评论 / 字幕 / 私信 / 投稿 | bilibili-api-python |
 
-九个项目、约 1.3 MB 源码、33 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）。
+十个项目、39 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
 
 ---
 
@@ -55,9 +56,18 @@
   <img src="plugins/dsh-idea-log/docs/wall-filter.jpg" width="49%" alt="按类型筛到「插件点子」">
 </p>
 
+**鱼鱼画画**（本机 RTX 3070 8G 用 `draw_image` 实拍，缩成 JPG 放仓库）：
+
+<p>
+  <img src="plugins/dsh-fish-paint/docs/samples/portrait_832x1216.jpg" width="24%" alt="portrait：银发校服樱花">
+  <img src="plugins/dsh-fish-paint/docs/samples/anime_1024.jpg" width="24%" alt="anime：月夜哥特少女">
+  <img src="plugins/dsh-fish-paint/docs/samples/sticker_512.jpg" width="24%" alt="sticker：抱大鱼的表情包">
+  <img src="plugins/dsh-fish-paint/docs/samples/landscape_1216x832.jpg" width="24%" alt="landscape：夕阳海边">
+</p>
+
 ---
 
-## 五个设计故事
+## 六个设计故事
 
 ### 1. 点歌：按「静音」切，而不是按时间切
 
@@ -107,6 +117,14 @@ Pixiv 和 B 站这两个 MCP 都支持 `PIXIV_MCP_TOOLS` / `BILI_MCP_TOOLS` 环�
 
 几个刻意的决定：任务书由 **Host** 生成（`lib/start.mjs`，页面只是转交），这样「按类型该给什么指令」只有一处真相；**只预填、不自动发送**，人还能改；两侧的协议常量由 `tests/start.test.mjs` 检查，改一边忘了另一边会红；已经是「孵化中」的条目不再给开工按钮（锁哪几种状态也只写在一处：`START_BLOCKED_STATUSES`），同一条不会反复开成几个对话。页面单独打开（没有父窗口）时退化成复制到剪贴板——不会假装成功。
 
+### 6. 出图：8G 显存里，别让驱动替你决定
+
+SDXL 整卡加载需要约 8.2GB，而 8G 卡上桌面常年占着 1.6-2GB。第一版 `full` 模式的教训是：显存不够时 Windows（WDDM）不会立刻报 OOM，而是把溢出的部分挪进系统内存，然后安静地 thrash——压测里一张 512² 图 600 秒没有输出，看起来像「卡死」，其实一直在跑。
+
+`dsh-fish-paint` 改成两道显式判断：worker 加载前先算「模型字节 + 1600MiB 余量」，不够就抛 OOM 并按 `auto` 回退 `cpu_offload`；插件侧再开一个常驻 worker（第一次约 40 秒加载，之后一直热着，空闲 30 分钟自退），把每次出图省掉一次加载。代价是单卡只能串行，`draw_image` 的队列替用户排好。
+
+发送侧的闸也一样——不维护第二份 R18 名单：每张图落盘时写 rating sidecar，发送前动态加载 qq-bridge 的 `r18-guard.js` 判定，模块缺失就 fail-closed 宁可不发。被拒时图还在本地，错误里写清楚是哪个会话、几张图。
+
 ---
 
 ## 一些数字
@@ -120,6 +138,7 @@ Pixiv 和 B 站这两个 MCP 都支持 `PIXIV_MCP_TOOLS` / `BILI_MCP_TOOLS` 环�
 | 插件目录 | 检索 6900+ 个 DSH 插件，标注本机已装状态 |
 | 群聊档案 | 3 万条历史约 7 秒建完索引；中文检索 4 级降级；看板单文件、红线每人最多两根 |
 | 灵感账本 | 每天 23:30 自动提炼一轮；24 小时同名去重；「开工」只预填不自动发送 |
+| 鱼鱼画画 | Illustrious-XL-v2.0（6.6GB）；RTX 3070 8G 上 512² 12-19s / 1024² 37-58s / 1216×832 52s；35 个单测 |
 
 ---
 
@@ -171,7 +190,8 @@ dsh-lab/
 │  ├─ dsh-self-extend/    # 插件自扩展闭环
 │  ├─ dsh-adb-phone/      # adb 手机控制
 │  ├─ dsh-qq-archive/     # 群聊档案馆（搜索内核 + 档案 + 日报/周报 + 看板 + 问答/日历/资源库 + 熟人卡）
-│  └─ dsh-idea-log/       # 灵感账本（随手记 + 每日提炼 + 灵感墙 + 一键开工）
+│  ├─ dsh-idea-log/       # 灵感账本（随手记 + 每日提炼 + 灵感墙 + 一键开工）
+│  └─ dsh-fish-paint/     # 鱼鱼画画（diffusers 常驻 worker + 出图落盘 + QQ 投递）
 └─ mcp/
    ├─ pixiv-duty/         # Pixiv MCP（px_* 7 个工具）
    └─ bili-duty/          # B 站 MCP（bili_* 30 个工具）
@@ -184,4 +204,5 @@ dsh-lab/
 - 本仓库**自有代码**：MIT，见 [LICENSE](LICENSE)。
 - `mcp/bili-duty/mcp_server.py`：派生自 [AGI_Ananas/bilibili-mcp](https://github.com/AGI_Ananas/bilibili-mcp)（MIT），改动清单见文件头注释与 [NOTICE](mcp/bili-duty/NOTICE.md)。
 - `plugins/dsh-coser-fish`：内核来自 `coser-image-search v1.0.0`（MIT，Copyright © 2026 小鲸鱼），插件层为适配 DSH / QQ 桥新增。
+- `plugins/dsh-fish-paint`：代码 MIT；使用的 Illustrious-XL-v2.0 模型（CreativeML Open RAIL-M）**不随仓库分发**，由安装脚本从 ModelScope 下载。
 - 仓库不含任何平台账号凭证。代码只做只读抓取与个人收藏用途；平台内容版权归各平台与原作者，使用时请遵守对应服务条款。
