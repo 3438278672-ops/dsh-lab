@@ -65,6 +65,7 @@ test('recordImage 写同名 .json、<png>.meta.json、追加 index.jsonl', () =>
       steps: 28,
       cfg: 5.5,
       model: 'Illustrious-XL-v2.0',
+      modelKey: 'nsfw',
       engine: { vramMode: 'auto', loadSec: 1.5 },
       rating: 'nsfw',
       target: 'group:1104418054',
@@ -85,6 +86,7 @@ test('recordImage 写同名 .json、<png>.meta.json、追加 index.jsonl', () =>
   assert.equal(onDisk.negative, 'lowres')
   assert.equal(onDisk.preset, 'anime')
   assert.equal(onDisk.model, 'Illustrious-XL-v2.0')
+  assert.equal(onDisk.modelKey, 'nsfw')
   assert.deepEqual(onDisk.engine, { vramMode: 'auto', loadSec: 1.5 })
   assert.equal(onDisk.target, 'group:1104418054')
   assert.equal(onDisk.note, '单测')

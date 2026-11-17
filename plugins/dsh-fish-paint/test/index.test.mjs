@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { apply, inject, name } from '../index.js'
+import { apply, inject, name, pickModelKey } from '../index.js'
 
 function makeCtx() {
   const tools = new Map()
@@ -77,7 +77,7 @@ test('导出约定与注册：4 个工具 + fish-paint 提示词 section', () =>
     assert.equal(sections.length, 1)
     assert.equal(sections[0].name, 'fish-paint')
     assert.equal(sections[0].order, 900)
-    for (const keyword of ['draw_image', 'draw_status', 'draw_setup', 'draw_recent', 'R18', 'sticker', 'danbooru', 'px_search', 'P 站']) {
+    for (const keyword of ['draw_image', 'draw_status', 'draw_setup', 'draw_recent', 'R18', 'sticker', 'danbooru', 'px_search', 'P 站', 'qq_impression', '画群友']) {
       assert.ok(sections[0].text.includes(keyword), `systemPrompt 应提到 ${keyword}`)
     }
   } finally {
@@ -166,5 +166,25 @@ test('draw_recent：空目录返回 0 条；date 格式错误返回 BAD_REQUEST'
     assert.equal(badDate.error.code, 'BAD_REQUEST')
   } finally {
     cleanup()
+  }
+})
+
+test('pickModelKey：显式 model 优先；auto 只在 nsfw 模型存在时切；defaultModel=nsfw 可改默认', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fish-paint-model-'))
+  const nsfwFile = path.join(dir, 'waiNSFWIllustrious_v150.safetensors')
+  const baseCfg = { modelPath: path.join(dir, 'base.safetensors'), nsfwModelPath: nsfwFile, defaultModel: 'base' }
+  try {
+    assert.equal(pickModelKey(baseCfg, 'base', 'nsfw'), 'base', '显式 base 不该被 auto 改掉')
+    assert.equal(pickModelKey(baseCfg, 'nsfw', 'sfw'), 'nsfw', '显式 nsfw 尊重调用方')
+    assert.equal(pickModelKey(baseCfg, undefined, 'sfw'), 'base')
+    assert.equal(pickModelKey(baseCfg, 'auto', 'nsfw'), 'base', 'nsfw 模型还没下载时回退默认模型')
+
+    fs.writeFileSync(nsfwFile, 'fake')
+    assert.equal(pickModelKey(baseCfg, undefined, 'nsfw'), 'nsfw', '模型在盘上时 auto 切 NSFW')
+    assert.equal(pickModelKey(baseCfg, 'auto', 'sfw'), 'base')
+
+    assert.equal(pickModelKey({ ...baseCfg, defaultModel: 'nsfw' }, undefined, 'sfw'), 'nsfw', 'defaultModel 可把默认改成 NSFW')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })

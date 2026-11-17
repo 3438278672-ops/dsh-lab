@@ -114,7 +114,7 @@ status 回应：
 - 纯 ESM，`engines.node >= 20`，**零 npm 依赖**（只许 node: 内置模块）。
 - 所有默认路径以插件根 `path.dirname(fileURLToPath(import.meta.url))` 为基准，config 可覆盖。
 - 配置对象（cordis.patch.yml 传 `{}`，全部有默认值）：
-  `modelPath`、`dataDir`、`pythonPath`、`bridgeDir`（自动探测，找不到才填）、`idleMinutes`（默认 30）、`maxVariants`（默认 4）、`steps`（默认 28）、`cfg`（默认 5.5）、`vramMode`（默认 auto）、`drawCooldownMinutes`（默认 60，0=关）、`drawCooldownMax`（默认 1）、`vipList`（默认 `["2220222310"]`）。
+  `modelPath`、`nsfwModelPath`（可选，默认 `<dataDir>/models/waiNSFWIllustrious_v150.safetensors`）、`defaultModel`（默认 `base`；设成 `nsfw` 则默认用 NSFW 模型）、`dataDir`、`pythonPath`、`bridgeDir`（自动探测，找不到才填）、`idleMinutes`（默认 30）、`maxVariants`（默认 4）、`steps`（默认 28）、`cfg`（默认 5.5）、`vramMode`（默认 auto）、`drawCooldownMinutes`（默认 60，0=关）、`drawCooldownMax`（默认 1）、`vipList`（默认 `["2220222310"]`）。
 - `lib/ratelimit.js` 对 index.js 暴露：
   ```js
   export function normalizeRequester(value)      // 'private:2220222310' / ' QQ 2220222310 ' → '2220222310'
@@ -130,9 +130,11 @@ status 回应：
 - `lib/engine.js` 对 index.js 暴露：
   ```js
   export function createEngine(opts)
-  // opts: {root, dataDir, pythonPath, modelPath, idleMinutes, vramMode, onLog}
+  // opts: {root, dataDir, pythonPath, modelPath, nsfwModelPath, idleMinutes, vramMode, onLog}
   // 返回 { generate(req), status(), shutdown(), isRunning() }
-  // generate(req) 的 req = {prompt, negative, width, height, steps, cfg, seed, count, clipSkip, outDir, resize}
+  // generate(req) 的 req = {prompt, negative, width, height, steps, cfg, seed, count, clipSkip, outDir, resize, model}
+  // model: 'base'（默认 modelPath）| 'nsfw'（nsfwModelPath）；换模型时引擎会重启 worker 重新加载权重
+  // status()/done 带 modelKey + modelPath；models 字段描述两个模型是否存在
   // 成功 resolve worker 的 done 对象；失败 reject Error（message 用 error.hint 优先）
   ```
 - `lib/store.js` 对 index.js 暴露：`ensureDirs(dataDir)`、`todayDir(dataDir)`、`recordImage({dataDir, image, meta})`（写 `.json` + `.png.meta.json` + index.jsonl）、`listRecent(dataDir, opts)`。
@@ -141,7 +143,7 @@ status 回应：
   export function bridgeStatus(bridgeDir)            // 同步，缺配置抛错
   export async function sendImages({key, paths, text, bridgeDir, tmpDir}) // resolve {ok, kind, id, sent:[{path,messageId}]}；失败抛 Error，message 可直接给人看
   ```
-- **输出契约**：PNG 存 `data/out/YYYY-MM-DD/`；同名 `.json` 元数据字段：`prompt, negative, preset, width, height, steps, cfg, seed, model, engine:{vramMode,loadSec}, rating, target, note, createdAt`；同名 `.png.meta.json` sidecar：`{"rating":"all"|"r18","source":"dsh-fish-paint","createdAt":ISO}`（rating: sfw→all，nsfw→r18），**sidecar 路径必须是 `<png路径>.meta.json`**（跟 bridge 的 r18-guard 契约完全对齐）。
+- **输出契约**：PNG 存 `data/out/YYYY-MM-DD/`；同名 `.json` 元数据字段：`prompt, negative, preset, width, height, steps, cfg, seed, model, modelKey, engine:{vramMode,loadSec}, rating, target, note, createdAt`；同名 `.png.meta.json` sidecar：`{"rating":"all"|"r18","source":"dsh-fish-paint","createdAt":ISO}`（rating: sfw→all，nsfw→r18），**sidecar 路径必须是 `<png路径>.meta.json`**（跟 bridge 的 r18-guard 契约完全对齐）。
 - 默认负面词（presets.js，2026-11-17 用户要求加通用硬约束）：
   `lowres, bad anatomy, bad hands, poorly drawn hands, mutated hands, malformed hands, extra hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, bad proportions, extra limbs, missing limbs, extra arms, extra legs, long neck, poorly drawn face, deformed face, asymmetrical eyes, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated`
   调用方传 `negative` 时**追加**到该串之后（不能替换），保证手指数/肢体/比例约束对每张图生效。

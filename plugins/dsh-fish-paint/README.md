@@ -27,6 +27,15 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 
 ![DeepSeek-Chan](docs/samples/deepseek-chan_832x1216.jpg)
 
+## 画群友 / 画个我
+
+群里有人说「画个我」时，先把档案馆里对 TA 的印象拿来当素材：调用 `dsh-qq-archive` 的 `qq_impression`（只读缓存，`user` = 发言人 QQ，`chat` = 当前会话），拿 120~220 字小传 + 标签，再把性格 / 梗 / 习惯翻成画面元素（表情、动作、服装配色、随身小物、背景彩蛋），默认画成二次元少女（和大肥鱼同画风），梗可以夸张一点。
+
+- 只画当前发言人本人，别人替 TA 点名不画；发言人 QQ 号从 QQ 消息的 `userId` 取。
+- 档案馆还没攒够印象（`found: false`）就照实说「还没攒够你的印象，多聊几句再来」，不硬编、不拿通用萌妹糊弄。
+- 印象只当灵感，不把原文念给群友；先转成具体 danbooru tags 再调 `draw_image`，`requester` 填发言人 QQ。
+- 需要装 `dsh-qq-archive` 才有 `qq_impression`；没有就走普通画图，不假装查过。
+
 ## 画点名角色：先查 P 站对齐标签
 
 用户点名一个具体角色（中文名、日文名、外号都行）时，先查 pixiv 再画，避免把角色画错：
@@ -49,10 +58,12 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | `draw_setup` | 一键安装（后台）、冒烟验证、只读状态 |
 | `draw_recent` | 回看最近生成（按条数 / 日期 / target 过滤） |
 | 预设 | `anime` 1024²、`portrait` 832×1216、`landscape` 1216×832、`sticker` 1024² 出图后缩到 512² |
+| 双模型 | 默认 Illustrious-XL-v2.0（画风稳）；可选装 WAI-NSFW-illustrious（画色图），`rating=nsfw` 且模型就绪时自动切换，也能用 `model` 参数手动指定 |
 | 默认负面词 | 质量词 + 手部/肢体硬约束始终生效：`bad hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, extra limbs, bad proportions …`；自定义 negative 只能**追加**，不能替换 |
 | 限流 | 跟唱歌插件一个规矩：一个人 60 分钟只能请求画一次（`requester` 记 QQ 号），vip 名单（默认 `2220222310`）不限；生成失败会自动退还名额 |
 | R18 硬闸 | 每张图带 rating sidecar，发送时由 qq-bridge 的 r18-guard 判定，群聊默认发不出去 |
 | 点名角色 | 先查 pixiv 对齐「角色名 (作品名)」与外观标签再画（见上节），减少把角色画错 |
+| 画群友 | 「画个我」时先调 `qq_impression` 读群友的人物印象，再翻成 danbooru tags 出图（需要 `dsh-qq-archive`） |
 
 ## 环境要求
 
@@ -105,6 +116,7 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | `seed` | number | `-1`/不填 = 随机；返回实际 seed，可复现 |
 | `variants` | number | 一次出几张，1-4，默认 1 |
 | `rating` | `sfw` / `nsfw` | 默认 sfw；nsfw 写 `rating=r18` 的 sidecar |
+| `model` | `auto` / `base` / `nsfw` | 可选，用哪个模型：`auto`（默认，rating=nsfw 且有 NSFW 模型时切 WAI）/ `base`（Illustrious）/ `nsfw`（WAI-NSFW，画色图用）。换模型会重启 worker，首次多等 10-30 秒 |
 | `target` | string | `group:群号` / `private:QQ号`，给了就出图后自动发送 |
 | `requester` | string | 点图人的 QQ 号（QQ 会话里必填发送者 QQ）。限流按它记账：默认一人 60 分钟一次，vip 名单不限；不传不限流 |
 | `note` | string | 备注（谁要的/什么梗），写进元数据 |
@@ -179,7 +191,9 @@ patch 里 `config` 可覆盖（全部有默认值，**没有任何必须手填�
 | --- | --- | --- |
 | `dataDir` | `<插件根>/data` | 数据目录（venv、模型、输出、状态都在下面） |
 | `pythonPath` | `<dataDir>/.venv/Scripts/python.exe` | worker 用的 Python |
-| `modelPath` | `<dataDir>/models/Illustrious-XL-v2.0.safetensors` | SDXL 模型 |
+| `modelPath` | `<dataDir>/models/Illustrious-XL-v2.0.safetensors` | 默认 SDXL 模型 |
+| `nsfwModelPath` | `<dataDir>/models/waiNSFWIllustrious_v150.safetensors` | 可选的 NSFW 模型（WAI-NSFW-illustrious）；文件不存在时 `auto` 会退回默认模型 |
+| `defaultModel` | `base` | `base`（Illustrious）或 `nsfw`（WAI）；设成 nsfw 则默认就画色图 |
 | `bridgeDir` | 自动探测 | qq-bridge 目录（发 QQ / R18 判定用）；探测不到时填这里 |
 | `ffmpegPath` | 自动探测（PATH） | 图片 >10MB 时转 JPEG 用 |
 | `idleMinutes` | `30` | worker 空闲多少分钟自动退出；0 关闭 |
@@ -219,6 +233,22 @@ patch 里 `config` 可覆盖（全部有默认值，**没有任何必须手填�
         vramMode: auto
         bridgeDir: D:\DPQQ\qq-bridge-0.2.1-r1\qq-bridge-0.2.1-r1   # 只在自动探测不到时填
 ```
+
+## 换模型 / 装 NSFW 模型
+
+默认模型是 **Illustrious-XL-v2.0**（6.46 GiB，`data/models/Illustrious-XL-v2.0.safetensors`）。想画色图建议再装 **WAI-NSFW-illustrious-SDXL v15.0**：它也是 Illustrious 系、同样吃 danbooru tags，现有的提示词/负面词/参数不用改。
+
+1. 下载（约 6.94 GB，本机实测 hf-mirror 16 连接约 2-5 MB/s）：
+   `https://hf-mirror.com/IbarakiDouji/WAI-NSFW-illustrious-SDXL/resolve/main/waiNSFWIllustrious_v150.safetensors`
+   - 大小：`6,938,040,682` 字节；sha256：`befc694a296f75e996488ebf9f9db8a1493bd059b6e704b975829e87d5aeb4fa`
+2. 放到 `data/models/waiNSFWIllustrious_v150.safetensors`（文件名和默认 `nsfwModelPath` 一致；不同就改 config）。
+3. 重载插件（`plugin_manager` 里 `set_bundle` 关/开一次 `dsh-fish-paint`），然后 `draw_status`：`models.nsfw.exists` 应为 true。
+4. 用法：
+   - `rating: "nsfw"` 且模型就绪 → 自动用 WAI（`model: "auto"` 默认行为）；
+   - `model: "nsfw"` 强制用 WAI、`model: "base"` 强制用 Illustrious；
+   - 想把 WAI 设成默认：config `defaultModel: nsfw`。
+
+换默认模型：任何 **SDXL 架构的单文件**（Illustrious / NoobAI / Animagine / Pony v6 都可以）丢进 `data/models/`，把 `modelPath` 指过去，重载插件即可。SD1.5、Flux 不支持；目前不支持单独挂 VAE / LoRA。切换模型时 worker 会重启并重新加载权重（首次多等 10-30 秒），同一轮别来回切。
 
 ## R18 口径
 
@@ -307,7 +337,7 @@ dsh-fish-paint/
 - 真发 QQ：sfw 发 owner 私聊成功（含 2 张分批）；nsfw sidecar 发非白名单群被 r18-guard 拒绝且图未丢。
 - `draw_setup action=verify` 512² 冒烟 15.2s；`draw_recent`、sidecar、同名 metadata、index.jsonl 均正确。
 - 插件已 `install_bundle` 进 profile，`ctx.effect` / `tools.register` / systemPrompt 注入在宿主里真实生效。
-- `node --test test/` = 49 pass / 0 fail；`node --check` 全过。
+- `node --test test/` = 52 pass / 0 fail；`node --check` 全过。
 
 **已知限制：**
 

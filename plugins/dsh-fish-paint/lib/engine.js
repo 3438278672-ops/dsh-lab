@@ -51,7 +51,8 @@ export function isPidAlive(pid) {
  * @param {string} [options.root]              插件根目录（默认 cwd）
  * @param {string} [options.dataDir]           data 目录
  * @param {string} [options.pythonPath]        venv 里的 python
- * @param {string} [options.modelPath]         safetensors 模型
+ * @param {string} [options.modelPath]         safetensors 模型（默认模型，base）
+ * @param {string} [options.nsfwModelPath]     可选，NSFW 特化模型；generate 传 model:'nsfw' 时切换加载
  * @param {string} [options.workerScript]      engine/worker.py（测试可换成 fake worker）
  * @param {number} [options.idleMinutes]       空闲多少分钟后退出，<=0 关闭
  * @param {string} [options.vramMode]          auto|full|offload
@@ -70,7 +71,12 @@ export function createEngine(options = {}) {
   const dataDir = resolveOption(options.dataDir, path.join(root, 'data'))
   const stateDir = path.join(dataDir, 'state')
   const pythonPath = resolveOption(options.pythonPath, path.join(dataDir, '.venv', 'Scripts', 'python.exe'))
-  const modelPath = resolveOption(options.modelPath, path.join(dataDir, 'models', 'Illustrious-XL-v2.0.safetensors'))
+  const baseModelPath = resolveOption(options.modelPath, path.join(dataDir, 'models', 'Illustrious-XL-v2.0.safetensors'))
+  // 可选的第二个模型（NSFW 特化）。空字符串 = 没配，选 nsfw 时给出可读的错误。
+  const nsfwModelPath = optionalPathOption(options.nsfwModelPath)
+  // 当前 worker 实际加载的模型：generate 传 model:'nsfw' 时自动切换（杀掉旧 worker 再起新的）。
+  let activeModelPath = baseModelPath
+  let activeModelKey = 'base'
   const workerScript = resolveOption(options.workerScript, path.join(root, 'engine', 'worker.py'))
   const pidFile = options.pidFile ? path.resolve(options.pidFile) : path.join(stateDir, 'worker.json')
   const logFile = path.join(stateDir, 'worker.log')
@@ -105,6 +111,13 @@ export function createEngine(options = {}) {
 
   function resolveOption(value, fallback) {
     if (typeof value !== 'string' || !value.trim()) return path.normalize(fallback)
+    const trimmed = value.trim()
+    return path.normalize(path.isAbsolute(trimmed) ? trimmed : path.resolve(root, trimmed))
+  }
+
+  /** 可选路径：没配就是空字符串（不像 resolveOption 那样补默认值）。 */
+  function optionalPathOption(value) {
+    if (typeof value !== 'string' || !value.trim()) return ''
     const trimmed = value.trim()
     return path.normalize(path.isAbsolute(trimmed) ? trimmed : path.resolve(root, trimmed))
   }
@@ -150,20 +163,54 @@ export function createEngine(options = {}) {
     const missing = []
     if (!fs.existsSync(pythonPath)) missing.push(pythonPath)
     if (!fs.existsSync(workerScript)) missing.push(workerScript)
-    const modelExists = fs.existsSync(modelPath)
-    if (!modelExists) missing.push(modelPath)
+    const modelExists = fs.existsSync(activeModelPath)
+    if (!modelExists) missing.push(activeModelPath)
     return {
       ok: missing.length === 0,
       pythonPath,
       pythonExists: fs.existsSync(pythonPath),
       workerScript,
       workerScriptExists: fs.existsSync(workerScript),
-      modelPath,
+      modelPath: activeModelPath,
+      modelKey: activeModelKey,
+      models: modelPathsInfo(),
       modelExists,
-      modelBytes: fileSize(modelPath),
+      modelBytes: fileSize(activeModelPath),
       missing,
       message: missing.length ? `引擎未安装，先 draw_setup install（或跑 node engine/setup.mjs）。缺：${missing.join('、')}` : '',
     }
+  }
+
+  /** 两个模型各自的状态，status 里给模型看（nsfw 没配时 path 为空）。 */
+  function modelPathsInfo() {
+    const describe = (file) => ({ path: file, exists: file ? fs.existsSync(file) : false, bytes: file ? fileSize(file) : 0 })
+    return { base: describe(baseModelPath), nsfw: describe(nsfwModelPath) }
+  }
+
+  async function setActiveModel(key) {
+    const nextKey = key === 'nsfw' ? 'nsfw' : 'base'
+    if (nextKey === activeModelKey) return
+    const nextPath = nextKey === 'nsfw' ? nsfwModelPath : baseModelPath
+    if (!nextPath) {
+      throw engineError(
+        'MODEL_MISSING',
+        '没有配置 NSFW 模型：在插件 config 里填 nsfwModelPath（或把 waiNSFWIllustrious_v150.safetensors 放进 data/models/）后重载插件。',
+      )
+    }
+    if (!fs.existsSync(nextPath)) {
+      throw engineError(
+        'MODEL_MISSING',
+        `NSFW 模型文件缺失：${nextPath}。先下载模型（见 README「换模型」），再重试。`,
+        { modelPath: nextPath },
+      )
+    }
+    if (proc) {
+      log(`切换模型 ${activeModelKey} → ${nextKey}（${path.basename(nextPath)}）`)
+      await killProc('切换模型')
+    }
+    activeModelKey = nextKey
+    activeModelPath = nextPath
+    log(`当前模型：${activeModelKey} = ${path.basename(activeModelPath)}`)
   }
 
   function assertInstalled() {
@@ -174,8 +221,8 @@ export function createEngine(options = {}) {
     if (!state.modelExists) {
       throw engineError(
         'MODEL_MISSING',
-        `模型文件缺失：${modelPath}。先 draw_setup install（或跑 node engine/setup.mjs --install）下载模型。`,
-        { modelPath },
+        `模型文件缺失：${activeModelPath}。先 draw_setup install（或跑 node engine/setup.mjs --install）下载模型。`,
+        { modelPath: activeModelPath, modelKey: activeModelKey },
       )
     }
   }
@@ -195,7 +242,7 @@ export function createEngine(options = {}) {
       fs.mkdirSync(stateDir, { recursive: true })
       fs.writeFileSync(
         pidFile,
-        `${JSON.stringify({ pid, startedAt: new Date().toISOString(), modelPath, pythonPath, workerScript }, null, 2)}\n`,
+        `${JSON.stringify({ pid, startedAt: new Date().toISOString(), modelPath: activeModelPath, modelKey: activeModelKey, pythonPath, workerScript }, null, 2)}\n`,
         'utf8',
       )
     } catch {
@@ -298,7 +345,7 @@ export function createEngine(options = {}) {
       FISH_PAINT_VRAM: vramMode,
       ...extraEnv,
     }
-    const child = spawn(pythonPath, [workerScript, '--model', modelPath, '--data-dir', dataDir], {
+    const child = spawn(pythonPath, [workerScript, '--model', activeModelPath, '--data-dir', dataDir], {
       cwd: root,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -308,7 +355,7 @@ export function createEngine(options = {}) {
     ready = false
     readyInfo = null
     if (child.pid) writePidFile(child.pid)
-    log(`启动 worker pid=${child.pid ?? '?'} model=${path.basename(modelPath)} vram=${vramMode}`)
+    log(`启动 worker pid=${child.pid ?? '?'} model=${activeModelKey}:${path.basename(activeModelPath)} vram=${vramMode}`)
     attach(child)
 
     const readyPromise = new Promise((resolve, reject) => {
@@ -606,7 +653,10 @@ export function createEngine(options = {}) {
 
   async function generate(request = {}) {
     const payload = buildGeneratePayload(request)
+    const requestedModel = request.model === 'nsfw' ? 'nsfw' : 'base'
     return serial(async () => {
+      // 换模型要重起 worker（worker.py 用 --model 加载），所以放在串行区里做。
+      await setActiveModel(requestedModel)
       let attempt = 0
       let lastError = null
       while (attempt < 2) {
@@ -619,6 +669,8 @@ export function createEngine(options = {}) {
           }
           crashStreak = 0
           cooldownUntil = 0
+          done.modelKey = activeModelKey
+          done.modelPath = activeModelPath
           return done
         } catch (error) {
           lastError = error
@@ -638,6 +690,8 @@ export function createEngine(options = {}) {
       pythonPath: state.pythonPath,
       pythonExists: state.pythonExists,
       modelPath: state.modelPath,
+      modelKey: activeModelKey,
+      models: state.models,
       modelExists: state.modelExists,
       modelBytes: state.modelBytes,
       workerScript: state.workerScript,
@@ -661,7 +715,7 @@ export function createEngine(options = {}) {
     if (!state.pythonExists || !state.workerScriptExists) {
       info.note = '引擎还没装：先 draw_setup install（或跑 node engine/setup.mjs）'
     } else if (!state.modelExists) {
-      info.note = `模型文件缺失：${modelPath}，先 draw_setup install 下载模型`
+      info.note = `模型文件缺失：${activeModelPath}，先 draw_setup install 下载模型`
     } else if (info.cooldownMsLeft > 0) {
       info.note = `引擎连续崩溃，冷却中（还剩约 ${Math.ceil(info.cooldownMsLeft / 1000)} 秒）`
     } else if (!proc) {
@@ -751,7 +805,7 @@ export function createEngine(options = {}) {
     dispose,
     isRunning,
     installState,
-    paths: { root, dataDir, stateDir, pythonPath, modelPath, workerScript, pidFile, logFile },
+    paths: { root, dataDir, stateDir, pythonPath, modelPath: activeModelPath, baseModelPath, nsfwModelPath, workerScript, pidFile, logFile },
   }
 }
 

@@ -48,7 +48,7 @@ export function todayDir(dataDir, date = new Date()) {
  * @param {object} options
  * @param {string} options.dataDir
  * @param {{path:string,seed?:number,width?:number,height?:number}} options.image worker done 行里的图片对象
- * @param {object} [options.meta] prompt/negative/preset/steps/cfg/model/engine/rating/target/note/elapsedSec
+ * @param {object} [options.meta] prompt/negative/preset/steps/cfg/model/modelKey/engine/rating/target/note/elapsedSec
  * @returns {object} 写进 .json 的那份记录（含最终 path/width/height/rating）
  */
 export function recordImage({ dataDir, image, meta = {} } = {}) {
@@ -86,6 +86,7 @@ export function recordImage({ dataDir, image, meta = {} } = {}) {
     cfg: Number.isFinite(Number(meta.cfg)) ? Number(meta.cfg) : null,
     seed,
     model: typeof meta.model === 'string' ? meta.model : '',
+    modelKey: meta.modelKey === 'nsfw' ? 'nsfw' : 'base',
     engine:
       meta.engine && typeof meta.engine === 'object'
         ? { vramMode: meta.engine.vramMode ?? null, loadSec: Number(meta.engine.loadSec) || 0 }

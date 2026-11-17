@@ -20,11 +20,14 @@ function makeEnv({ env = {}, engineOptions = {} } = {}) {
   fs.mkdirSync(path.join(dataDir, 'models'), { recursive: true })
   const modelPath = path.join(dataDir, 'models', 'Illustrious-XL-v2.0.safetensors')
   fs.writeFileSync(modelPath, 'fake-model')
+  const nsfwModelPath = path.join(dataDir, 'models', 'waiNSFWIllustrious_v150.safetensors')
+  fs.writeFileSync(nsfwModelPath, 'fake-model-nsfw')
   const engine = createEngine({
     root,
     dataDir,
     pythonPath: process.execPath,
     modelPath,
+    nsfwModelPath,
     workerScript: fakeWorker,
     idleMinutes: 0,
     readyTimeoutMs: 5000,
@@ -45,7 +48,7 @@ function makeEnv({ env = {}, engineOptions = {} } = {}) {
       /* Windows 上刚 kill 的进程可能还占着 cwd，临时目录留着无妨 */
     }
   }
-  return { root, dataDir, modelPath, engine, cleanup }
+  return { root, dataDir, modelPath, nsfwModelPath, engine, cleanup }
 }
 
 function request(dataDir, prompt, extra = {}) {
@@ -262,6 +265,49 @@ test('stdout 噪声行不会把引擎搞挂（坏 JSON 忽略）', async () => {
   try {
     const done = await engine.generate(request(dataDir, 'noise'))
     assert.equal(done.images.length, 1)
+  } finally {
+    cleanup()
+  }
+})
+
+test('模型切换：generate model:nsfw 重启 worker 换权重，status 反映当前模型', async () => {
+  const track = path.join(os.tmpdir(), `fish-paint-track-${process.pid}-${Date.now()}-switch.log`)
+  const { engine, dataDir, nsfwModelPath, cleanup } = makeEnv({ env: { FISH_FAKE_TRACK: track } })
+  try {
+    const first = await engine.generate(request(dataDir, 'base run'))
+    assert.equal(first.modelKey, 'base')
+    const second = await engine.generate(request(dataDir, 'nsfw run', { model: 'nsfw' }))
+    assert.equal(second.modelKey, 'nsfw')
+    assert.equal(second.model, path.basename(nsfwModelPath))
+    const events = fs.readFileSync(track, 'utf8').split('\n').filter(Boolean)
+    assert.equal(events.filter((event) => event === 'start').length, 2, '换模型应重启 worker')
+
+    const info = await engine.status()
+    assert.equal(info.modelKey, 'nsfw')
+    assert.equal(info.models.base.exists, true)
+    assert.equal(info.models.nsfw.exists, true)
+
+    const third = await engine.generate(request(dataDir, 'back to base'))
+    assert.equal(third.modelKey, 'base')
+  } finally {
+    cleanup()
+    try {
+      fs.rmSync(track, { force: true })
+    } catch {
+      /* 忽略 */
+    }
+  }
+})
+
+test('模型切换：没配 nsfwModelPath 时 model:nsfw 报 MODEL_MISSING', async () => {
+  const { engine, dataDir, cleanup } = makeEnv({ engineOptions: { nsfwModelPath: '' } })
+  try {
+    const error = await engine.generate(request(dataDir, 'want nsfw', { model: 'nsfw' })).then(
+      () => null,
+      (err) => err,
+    )
+    assert.equal(error?.code, 'MODEL_MISSING')
+    assert.match(error.message, /NSFW/)
   } finally {
     cleanup()
   }

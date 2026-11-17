@@ -64,6 +64,7 @@ export function apply(ctx, config) {
     dataDir: cfg.dataDir,
     pythonPath: cfg.pythonPath,
     modelPath: cfg.modelPath,
+    nsfwModelPath: cfg.nsfwModelPath,
     idleMinutes: cfg.idleMinutes,
     vramMode: cfg.vramMode,
   })
@@ -98,6 +99,13 @@ function mergeConfig(input) {
     dataDir,
     pythonPath: resolveFromRoot(pick('pythonPath'), path.join(dataDir, '.venv', 'Scripts', 'python.exe')),
     modelPath: resolveFromRoot(pick('modelPath'), path.join(dataDir, 'models', 'Illustrious-XL-v2.0.safetensors')),
+    // 第二个模型：NSFW 特化（WAI-NSFW-illustrious）。没下载时 auto 会和默认模型一样，不会因为缺文件报错。
+    nsfwModelPath: resolveFromRoot(
+      pick('nsfwModelPath'),
+      path.join(dataDir, 'models', 'waiNSFWIllustrious_v150.safetensors'),
+    ),
+    // 默认模型：base=Illustrious（画风稳），nsfw=WAI（默认就画色图）。auto 逻辑见 pickModelKey。
+    defaultModel: pick('defaultModel') === 'nsfw' ? 'nsfw' : 'base',
     // QQ 桥 / ffmpeg 不写死本机路径：config 优先，其次环境变量，最后自动探测。
     bridgeDir: resolveBridgeDir(pick('bridgeDir')),
     ffmpegPath: resolveFfmpeg(pick('ffmpegPath')),
@@ -197,6 +205,24 @@ function beginRateLimit(cfg, requester) {
   }
 }
 
+/**
+ * 选模型：base=Illustrious（画风稳），nsfw=WAI-NSFW（色图）。
+ * auto 时 rating=nsfw 且 NSFW 模型确实在盘上才切，缺文件就老老实实用默认模型，别把画画卡死。
+ */
+export function pickModelKey(cfg, requested, rating) {
+  if (requested === 'nsfw') return 'nsfw'
+  if (requested === 'base') return 'base'
+  if (cfg.defaultModel === 'nsfw') return 'nsfw'
+  if (rating === 'nsfw' && cfg.nsfwModelPath) {
+    try {
+      if (fs.existsSync(cfg.nsfwModelPath)) return 'nsfw'
+    } catch {
+      /* 路径不可读就当没有 */
+    }
+  }
+  return 'base'
+}
+
 // ── draw_image ─────────────────────────────────────────────────────────
 
 function registerDrawImage(ctx, cfg, engine) {
@@ -235,6 +261,12 @@ function registerDrawImage(ctx, cfg, engine) {
             enum: ['sfw', 'nsfw'],
             description: '内容分级，默认 sfw。nsfw 会写 rating=r18 的 sidecar，只有 R18 白名单会话能发送。',
           },
+          model: {
+            type: 'string',
+            enum: ['auto', 'base', 'nsfw'],
+            description:
+              '可选，用哪个模型：auto（默认，rating=nsfw 且有 NSFW 模型时自动用 WAI-NSFW）/ base（Illustrious，画风稳）/ nsfw（WAI-NSFW，画色图用）。换模型会自动重启 worker（首次切换多等 10-30 秒）。',
+          },
           target: {
             type: 'string',
             description: '可选，出图后自动发到 QQ：`group:群号` 或 `private:QQ号`。不传就只存本地。',
@@ -270,6 +302,7 @@ async function executeDrawImage(cfg, engine, args) {
   if (targetCheck.error) return failure({ code: 'BAD_REQUEST', message: targetCheck.error })
 
   const rating = args.rating === 'nsfw' ? 'nsfw' : 'sfw'
+  const modelKey = pickModelKey(cfg, args.model, rating)
   const variants = integerIn(args.variants, 1, cfg.maxVariants, 1)
   const built = buildArgs({
     preset: args.preset,
@@ -291,7 +324,7 @@ async function executeDrawImage(cfg, engine, args) {
 
   let payload
   try {
-    payload = await runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args })
+    payload = await runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args, modelKey })
   } finally {
     // 生成失败就把名额退回去，别让人因为一次 OOM 白等一小时。
     if (payload?.ok !== true && rate.release) rate.release()
@@ -300,7 +333,7 @@ async function executeDrawImage(cfg, engine, args) {
   return payload
 }
 
-async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args }) {
+async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args, modelKey }) {
   const startedAt = Date.now()
   let done
   let outDir
@@ -318,15 +351,18 @@ async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, target
       clipSkip: built.clipSkip,
       outDir,
       resize: built.resize,
+      model: modelKey,
     })
   } catch (error) {
-    return failure(error, { prompt: shorten(rawPrompt), preset: built.preset, rating })
+    return failure(error, { prompt: shorten(rawPrompt), preset: built.preset, rating, model: modelKey })
   }
 
   const elapsedSec = Number.isFinite(Number(done?.elapsedSec))
     ? Math.round(Number(done.elapsedSec) * 10) / 10
     : Math.round((Date.now() - startedAt) / 100) / 10
-  const model = typeof done?.model === 'string' && done.model ? done.model : path.basename(cfg.modelPath, '.safetensors')
+  const usedModelKey = done?.modelKey === 'nsfw' ? 'nsfw' : modelKey
+  const modelFile = usedModelKey === 'nsfw' ? cfg.nsfwModelPath : cfg.modelPath
+  const model = typeof done?.model === 'string' && done.model ? done.model : path.basename(modelFile, '.safetensors')
   const vramMode = typeof done?.vramMode === 'string' && done.vramMode ? done.vramMode : cfg.vramMode
   const loadSec = Number(done?.loadSec) || 0
   const cold = loadSec > 0
@@ -348,6 +384,7 @@ async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, target
           cfg: built.cfg,
           seed: image.seed,
           model,
+          modelKey: usedModelKey,
           engine: { vramMode, loadSec },
           rating,
           target: targetCheck.target,
@@ -392,12 +429,13 @@ async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, target
     }
   }
 
-  const summary = drawSummary({ built, images, elapsedSec, model, vramMode, cold, sent, sentError })
+  const summary = drawSummary({ built, images, elapsedSec, model, modelKey: usedModelKey, vramMode, cold, sent, sentError })
   const payload = {
     ok: true,
     images,
     elapsedSec,
     model,
+    modelKey: usedModelKey,
     engine: { mode: vramMode, cold },
     prompt: shorten(built.prompt, 400),
     negative: built.negative,
@@ -411,10 +449,10 @@ async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, target
   return payload
 }
 
-function drawSummary({ built, images, elapsedSec, model, vramMode, cold, sent, sentError }) {
+function drawSummary({ built, images, elapsedSec, model, modelKey, vramMode, cold, sent, sentError }) {
   const seeds = images.map((image) => image.seed).join(', ')
   const lines = [
-    `已生成 ${images.length} 张（${built.preset} ${built.width}×${built.height}，耗时 ${elapsedSec}s，seed ${seeds}，vramMode=${vramMode}${cold ? '，本次冷启动加载了模型' : ''}）。`,
+    `已生成 ${images.length} 张（${built.preset} ${built.width}×${built.height}，耗时 ${elapsedSec}s，seed ${seeds}，模型 ${model}${modelKey === 'nsfw' ? '（NSFW）' : ''}，vramMode=${vramMode}${cold ? '，本次冷启动加载了模型' : ''}）。`,
     `文件：${images.map((image) => image.path).join('；')}`,
     `提示词摘要：${shorten(built.prompt, 160)}`,
   ]
@@ -483,6 +521,8 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   else if (setup.running) next.push(`安装正在进行（${setup.phase} ${setup.percent}%），过几分钟再 draw_status 看。`)
   else if (workerStatus?.cooldownMsLeft > 0) next.push('引擎连续崩溃冷却中：等 1 分钟再看 data/state/worker.log 找原因。')
   else if (!workerStatus?.running) next.push('引擎空闲未启动，第一次 draw_image 会自动加载模型（约 30-60 秒）。')
+  const nsfwReady = Boolean(cfg.nsfwModelPath) && fs.existsSync(cfg.nsfwModelPath)
+  if (install.ok && !nsfwReady) next.push('NSFW 模型未就绪（可选）：rating=nsfw 时会退回默认模型；想画色图用 WAI-NSFW 看 README「换模型」。')
   if (statusError) next.push(`状态查询失败：${statusError.message}`)
   if (bridge.error) next.push(`QQ 桥不可用（${bridge.error}）：能出图但不能发送；填 config.bridgeDir 或设 FISH_PAINT_BRIDGE_DIR 后重试。`)
 
@@ -493,7 +533,7 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   const workerLogTail = tailFile(path.join(cfg.dataDir, 'state', 'worker.log'), 6)
   const setupLogTail = tailFile(path.join(cfg.dataDir, 'state', 'setup.log'), 4)
 
-  const summary = statusSummary({ install, setup, workerStatus, gpu, recent, bridge })
+  const summary = statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg })
   return {
     ok: true,
     installed: install.ok,
@@ -502,17 +542,25 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
       dataDir: cfg.dataDir,
       pythonPath: cfg.pythonPath,
       modelPath: cfg.modelPath,
+      nsfwModelPath: cfg.nsfwModelPath,
       bridgeDir: cfg.bridgeDir,
       ffmpegPath: cfg.ffmpegPath,
       workerLog: path.join(cfg.dataDir, 'state', 'worker.log'),
       setupLog: path.join(cfg.dataDir, 'state', 'setup.log'),
     },
+    models: workerStatus?.models ?? null,
+    currentModel: workerStatus ? { key: workerStatus.modelKey, path: workerStatus.modelPath } : null,
     python: { path: cfg.pythonPath, exists: install.pythonExists },
     model: {
       path: cfg.modelPath,
       exists: install.modelExists,
       bytes: install.modelBytes,
       sizeText: formatBytes(install.modelBytes),
+    },
+    nsfwModel: {
+      path: cfg.nsfwModelPath,
+      exists: nsfwReady,
+      sizeText: nsfwReady ? formatBytes(fileSize(cfg.nsfwModelPath)) : '0 B',
     },
     workerScript: { path: install.workerScript, exists: install.workerScriptExists },
     vramMode: cfg.vramMode,
@@ -536,9 +584,11 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   }
 }
 
-function statusSummary({ install, setup, workerStatus, gpu, recent, bridge }) {
+function statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg }) {
   const parts = []
   parts.push(install.ok ? '引擎已安装' : `引擎未安装（缺 ${install.missing.length} 项）`)
+  const nsfwReady = Boolean(cfg?.nsfwModelPath) && fs.existsSync(cfg.nsfwModelPath)
+  parts.push(nsfwReady ? '模型：Illustrious + WAI-NSFW' : '模型：Illustrious（NSFW 模型未下载）')
   if (setup.running) parts.push(`安装进行中：${setup.phase} ${setup.percent}%`)
   else if (setup.present && setup.phase === 'done') parts.push('安装已完成')
   if (workerStatus?.running) {
@@ -857,8 +907,10 @@ function normalizeTarget(value) {
 function failure(error, extra = {}) {
   const code = typeof error?.code === 'string' ? error.code : 'DRAW_FAILED'
   const message = String(error?.message || error || '未知错误')
-  const hint =
-    code === 'NOT_INSTALLED' || code === 'MODEL_MISSING'
+  const nsfwModelIssue = code === 'MODEL_MISSING' && /NSFW/i.test(message)
+  const hint = nsfwModelIssue
+    ? 'NSFW 模型还没装：按 README「换模型」下载 WAI-NSFW 后重载插件；或者把 model 改成 base 用默认模型。'
+    : code === 'NOT_INSTALLED' || code === 'MODEL_MISSING'
       ? '先 draw_setup action=install 安装引擎/模型，再用 draw_status 看进度。'
       : code === 'OOM'
         ? '显存不够：降低尺寸（portrait 或更小）或 steps 后重试。'
@@ -912,6 +964,15 @@ function formatBytes(bytes) {
   return `${value.toFixed(index >= 2 ? 1 : 0)} ${units[index]}`
 }
 
+function fileSize(file) {
+  try {
+    const stat = fs.statSync(file)
+    return stat.isFile() ? stat.size : 0
+  } catch {
+    return 0
+  }
+}
+
 function shorten(text, max = 160) {
   const cleaned = String(text ?? '')
     .replace(/\s+/g, ' ')
@@ -925,7 +986,7 @@ function shorten(text, max = 160) {
 function systemPromptText(cfg) {
   return [
     '## 鱼鱼画画（draw_image）',
-    '当用户要「画一张 / 画个 / 生成一张图 / 来个表情包 / 给这段配个图」时，用 draw_image 让本地 SDXL（Illustrious-XL）出图。插件不调 LLM，提示词由你负责组织。',
+    '当用户要「画一张 / 画个 / 生成一张图 / 来个表情包 / 给这段配个图」时，用 draw_image 让本地 SDXL（默认 Illustrious-XL，色图可自动切 WAI-NSFW）出图。插件不调 LLM，提示词由你负责组织。',
     '',
     '**1. 先把中文要求翻成英文 danbooru tags（逗号分隔）**',
     '- 质量词不用自己写（插件自动补 masterpiece, best quality, very aesthetic, absurdres, perfect hands），重复了会被去重；想让手部更稳可以再补 `detailed hands`。',
@@ -972,5 +1033,29 @@ function systemPromptText(cfg) {
     '**8. 限流（requester，跟唱歌一个规矩）**',
     `- QQ 会话里调 draw_image 必须把点图人的 QQ 号填进 \`requester\`（发消息那个群友的 QQ 号）；一个人 ${formatMinutes(cfg.drawCooldownMinutes)}只能请求画一次，vip 名单（${cfg.vipList.length ? cfg.vipList.join(', ') : '空'}）里的人不限。`,
     '- 返回 error.code=RATE_LIMITED 时，把「还要等约 X 分钟」告诉对方就行；不要换号、不要反复重试，也不要说「管理员不让画」。',
+    '',
+    '**9. 两个模型（model 参数，可选）**',
+    `- 默认模型是 Illustrious-XL-v2.0（画风稳，角色插画首选）；另有一个 NSFW 特化模型 WAI-NSFW-illustrious${nsfwModelReady(cfg) ? '（已就绪）' : '（未下载时 auto 会退回默认模型）'}，画色图时人体/质感更好。`,
+    '- 一般不用手动传 model：rating=nsfw 且 NSFW 模型在盘上时会自动切过去；想强制指定就传 `model="base"`（Illustrious）或 `model="nsfw"`（WAI）。',
+    '- 切换模型会重启 worker（首次多等 10-30 秒），同一轮别来回切；连着画色图时保持 nsfw 更省时间。',
+    '',
+    '**10. 画群友 / 画个我（先查档案馆的印象，再画）**',
+    '- 群友说「画个我 / 画我 / 画一下我」时，只画**当前发言人本人**，不画被 @ 或点名的人；先调 `qq_impression`（`user`=发言人的 QQ 号，`chat`=当前会话的 `group:群号`；QQ 号从消息的 userId/发送者取，别猜）拿档案馆里缓存的印象与标签。',
+    '- found=true：把印象里的性格、梗、习惯翻成**画面元素**（表情、动作、服装配色、随身小物、背景彩蛋），默认画成二次元少女、用 portrait，动漫插画风；可以按梗夸张、画得损一点，但不要画成真人、不要写实化，也不要出现现实身份线索（职业/学校/住址等）。',
+    '- 把 `tags` 和印象文字只当灵感，不要原样塞进英文 prompt：先转成具体 danbooru tag（发型/发色/瞳色/服装/动作/表情/构图/背景），再调 draw_image；requester 照旧填发言人 QQ 号、target 填当前会话。',
+    '- found=false 或这个人在缓存里没有印象：照实说「还没攒够你的印象，多聊几句再来」；**不要当场调 LLM 生成印象、不要凭空编人设**，也不要硬画一个通用萌妹糊弄过去。',
+    '- 不要把印象原文念给群友听（那是档案，不是画）；画完一句话说「照你平时的样子/梗画的」即可。',
+    '- 只在有 `qq_impression` 工具的会话里走这条路；没有这个工具（比如没有档案馆插件的主会话）就按普通画图处理，别假装查过。',
   ].join('\n')
+}
+
+/** systemPrompt 里说明 NSFW 模型在不在（apply 时算一次，重载插件后刷新）。 */
+function nsfwModelReady(cfg) {
+  const file = typeof cfg?.nsfwModelPath === 'string' ? cfg.nsfwModelPath : ''
+  if (!file) return false
+  try {
+    return fs.existsSync(file)
+  } catch {
+    return false
+  }
 }
