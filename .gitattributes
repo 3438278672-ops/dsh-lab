@@ -1,0 +1,20 @@
+# 统一换行：仓库里一律存 LF，工作区检出 LF（Windows 上也别变 CRLF，
+# 否则从插件本体目录同步代码时每个文件都会假报 modified）
+* text=auto eol=lf
+
+# 二进制：不要做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.db binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.safetensors binary
+*.pth binary
+*.ckpt binary
