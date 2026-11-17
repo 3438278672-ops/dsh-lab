@@ -114,7 +114,19 @@ status 回应：
 - 纯 ESM，`engines.node >= 20`，**零 npm 依赖**（只许 node: 内置模块）。
 - 所有默认路径以插件根 `path.dirname(fileURLToPath(import.meta.url))` 为基准，config 可覆盖。
 - 配置对象（cordis.patch.yml 传 `{}`，全部有默认值）：
-  `modelPath`、`dataDir`、`pythonPath`、`bridgeDir`（默认 `D:\DPQQ\qq-bridge-0.2.1-r1\qq-bridge-0.2.1-r1`）、`idleMinutes`（默认 30）、`maxVariants`（默认 4）、`steps`（默认 28）、`cfg`（默认 5.5）、`vramMode`（默认 auto）。
+  `modelPath`、`dataDir`、`pythonPath`、`bridgeDir`（自动探测，找不到才填）、`idleMinutes`（默认 30）、`maxVariants`（默认 4）、`steps`（默认 28）、`cfg`（默认 5.5）、`vramMode`（默认 auto）、`drawCooldownMinutes`（默认 60，0=关）、`drawCooldownMax`（默认 1）、`vipList`（默认 `["2220222310"]`）。
+- `lib/ratelimit.js` 对 index.js 暴露：
+  ```js
+  export function normalizeRequester(value)      // 'private:2220222310' / ' QQ 2220222310 ' → '2220222310'
+  export function parseVipList(value)            // 数组或 "1,2 3" → 去重后的 QQ 号数组
+  export function isVip(requester, vipList)
+  export function reserveDraw({file, requester, windowMs, max, now, session})
+  //   → {ok:true, reservedAt, resetAt, remaining} | {ok:false, retryAfterSec, resetAt, limit, windowMinutes}
+  export function releaseDraw({file, requester, at, windowMs, now})   // 生成失败退名额
+  export function cooldownStatus({file, requester, windowMs, max, now})
+  ```
+  台账文件 `data/state/draw-cooldown.json`；**读写失败一律放行**（限流不能把画画卡死）；vip 不记账。
+- index.js 的 draw_image 里：`requester`（QQ 号）→ 非 vip 且 `drawCooldownMinutes > 0` 时先 `reserveDraw`；返回 `RATE_LIMITED`（带 `retryAfterSec`）时不出图；生成失败（含 OOM/落盘失败）执行 `releaseDraw`。不传 `requester` 不限流。
 - `lib/engine.js` 对 index.js 暴露：
   ```js
   export function createEngine(opts)

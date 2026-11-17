@@ -16,6 +16,16 @@ import { createEngine } from './lib/engine.js'
 import { PRESET_NAMES, buildArgs, presetSummary } from './lib/presets.js'
 import { ensureDirs, listRecent, recordImage, todayDir } from './lib/store.js'
 import { bridgeStatus, resolveBridgeDir, resolveFfmpeg, sendImages } from './lib/qq.js'
+import {
+  DEFAULT_COOLDOWN_MAX,
+  DEFAULT_COOLDOWN_MINUTES,
+  DEFAULT_VIP_LIST,
+  isVip,
+  normalizeRequester,
+  parseVipList,
+  releaseDraw,
+  reserveDraw,
+} from './lib/ratelimit.js'
 
 export const name = 'dsh-fish-paint'
 export const inject = ['tools', 'systemPrompt']
@@ -29,6 +39,10 @@ const DEFAULTS = {
   steps: 28,
   cfg: 5.5,
   vramMode: 'auto',
+  // 限流：一个人 60 分钟只能请求画一次；vip 名单里的号不限。
+  drawCooldownMinutes: DEFAULT_COOLDOWN_MINUTES,
+  drawCooldownMax: DEFAULT_COOLDOWN_MAX,
+  vipList: DEFAULT_VIP_LIST,
 }
 
 /** 工具统一输出：execute 返回 payload，render 把 payload 变成 JSON 文本给模型看。 */
@@ -92,6 +106,10 @@ function mergeConfig(input) {
     steps: integerIn(pick('steps'), 4, 80, DEFAULTS.steps),
     cfg: numberIn(pick('cfg'), 1, 20, DEFAULTS.cfg),
     vramMode: ['auto', 'full', 'offload'].includes(pick('vramMode')) ? pick('vramMode') : DEFAULTS.vramMode,
+    // 限流：0 = 关闭；vipList 支持数组或 "1,2 3" 字符串，默认 2220222310。
+    drawCooldownMinutes: numberIn(pick('drawCooldownMinutes'), 0, 1440, DEFAULTS.drawCooldownMinutes),
+    drawCooldownMax: integerIn(pick('drawCooldownMax'), 1, 10, DEFAULTS.drawCooldownMax),
+    vipList: parseVipList(pick('vipList') === undefined ? DEFAULTS.vipList : pick('vipList')),
   }
 }
 
@@ -111,6 +129,72 @@ function integerIn(value, min, max, fallback) {
   const num = Math.trunc(Number(value))
   if (!Number.isFinite(num)) return fallback
   return Math.min(max, Math.max(min, num))
+}
+
+/** 人类可读的窗口长度：60 → "1 小时"，90 → "90 分钟"。 */
+function formatMinutes(minutes) {
+  const value = Number(minutes)
+  if (!Number.isFinite(value) || value <= 0) return '0 分钟'
+  if (value >= 60 && value % 60 === 0) return `${value / 60} 小时`
+  return `${Math.round(value)} 分钟`
+}
+
+/**
+ * 画画限流：返回 { requester, blocked|null, release|null }。
+ * blocked 是给模型的 RATE_LIMITED 失败 payload；release 在生成失败时退名额。
+ */
+function beginRateLimit(cfg, requester) {
+  if (!requester) return { requester: '', blocked: null, release: null }
+
+  // vip 名单里的人不限次数，也不记状态。
+  if (isVip(requester, cfg.vipList)) return { requester, blocked: null, release: null, vip: true }
+
+  const minutes = Number(cfg.drawCooldownMinutes)
+  if (!(minutes > 0)) return { requester, blocked: null, release: null }
+
+  const file = path.join(cfg.dataDir, 'state', 'draw-cooldown.json')
+  const windowMs = minutes * 60_000
+  let reservation
+  try {
+    reservation = reserveDraw({ file, requester, windowMs, max: cfg.drawCooldownMax })
+  } catch (error) {
+    // 只是限流台账写不进去，别把画画本身卡死。
+    console.warn(`[fish-paint] 限流状态读写失败，本次放行：${error.message}`)
+    return { requester, blocked: null, release: null }
+  }
+
+  if (!reservation.ok) {
+    const minutesLeft = Math.max(1, Math.ceil(reservation.retryAfterSec / 60))
+    return {
+      requester,
+      blocked: {
+        ok: false,
+        error: {
+          code: 'RATE_LIMITED',
+          message: `一个人 ${formatMinutes(minutes)}只能请求画一次（vip 名单不限），还要等约 ${minutesLeft} 分钟。`,
+          retryAfterSec: reservation.retryAfterSec,
+          resetAt: reservation.resetAt,
+        },
+        requester,
+        retryAfterSec: reservation.retryAfterSec,
+        resetAt: reservation.resetAt,
+        summary: `还在冷却：${requester} ${formatMinutes(minutes)}只能画一次，还要等约 ${minutesLeft} 分钟（vip 名单除外）。`,
+      },
+      release: null,
+    }
+  }
+
+  return {
+    requester,
+    blocked: null,
+    release: () => {
+      try {
+        releaseDraw({ file, requester, at: reservation.reservedAt, windowMs })
+      } catch (error) {
+        console.warn(`[fish-paint] 退还画画名额失败：${error.message}`)
+      }
+    },
+  }
 }
 
 // ── draw_image ─────────────────────────────────────────────────────────
@@ -155,6 +239,11 @@ function registerDrawImage(ctx, cfg, engine) {
             type: 'string',
             description: '可选，出图后自动发到 QQ：`group:群号` 或 `private:QQ号`。不传就只存本地。',
           },
+          requester: {
+            type: 'string',
+            description:
+              '可选，点图人的 QQ 号（QQ 会话里必须填消息发送者的 QQ 号）。限流就按它记账：默认一个人 60 分钟只能画一次，vip 名单里的号不限。不传不限流（本地/主会话直接用时不传）。',
+          },
           note: { type: 'string', description: '可选备注（谁要的/什么梗），会写进元数据。' },
         },
         required: ['prompt'],
@@ -195,6 +284,23 @@ async function executeDrawImage(cfg, engine, args) {
     maxVariants: cfg.maxVariants,
   })
 
+  // 限流：和唱歌插件一个规矩——一个人 N 分钟只能请求画一次，vip 名单除外。
+  const requester = normalizeRequester(args.requester)
+  const rate = beginRateLimit(cfg, requester)
+  if (rate.blocked) return rate.blocked
+
+  let payload
+  try {
+    payload = await runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args })
+  } finally {
+    // 生成失败就把名额退回去，别让人因为一次 OOM 白等一小时。
+    if (payload?.ok !== true && rate.release) rate.release()
+  }
+  if (rate.requester) payload.requester = rate.requester
+  return payload
+}
+
+async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args }) {
   const startedAt = Date.now()
   let done
   let outDir
@@ -411,6 +517,12 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
     workerScript: { path: install.workerScript, exists: install.workerScriptExists },
     vramMode: cfg.vramMode,
     idleMinutes: cfg.idleMinutes,
+    limits: {
+      cooldownMinutes: cfg.drawCooldownMinutes,
+      cooldownMax: cfg.drawCooldownMax,
+      vipList: cfg.vipList,
+      stateFile: path.join(cfg.dataDir, 'state', 'draw-cooldown.json'),
+    },
     gpu,
     worker,
     setup,
@@ -847,5 +959,9 @@ function systemPromptText(cfg) {
     '- 先看返回的 error.code：NOT_INSTALLED / MODEL_MISSING → 让用户跑 draw_setup action=install；OOM → 降尺寸或 steps；COOLDOWN → 等冷却。',
     '- draw_status 看安装/worker/显存/最近错误/下一步；draw_setup action=verify 能跑一张 512² 冒烟图确认引擎可用；draw_recent 回看最近生成的图（按日期/target 过滤）。',
     `日志在 ${path.join(cfg.dataDir, 'state', 'worker.log')} 与 ${path.join(cfg.dataDir, 'state', 'setup.log')}。`,
+    '',
+    '**7. 限流（requester，跟唱歌一个规矩）**',
+    `- QQ 会话里调 draw_image 必须把点图人的 QQ 号填进 \`requester\`（发消息那个群友的 QQ 号）；一个人 ${formatMinutes(cfg.drawCooldownMinutes)}只能请求画一次，vip 名单（${cfg.vipList.length ? cfg.vipList.join(', ') : '空'}）里的人不限。`,
+    '- 返回 error.code=RATE_LIMITED 时，把「还要等约 X 分钟」告诉对方就行；不要换号、不要反复重试，也不要说「管理员不让画」。',
   ].join('\n')
 }

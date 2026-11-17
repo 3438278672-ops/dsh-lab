@@ -37,6 +37,7 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | `draw_recent` | 回看最近生成（按条数 / 日期 / target 过滤） |
 | 预设 | `anime` 1024²、`portrait` 832×1216、`landscape` 1216×832、`sticker` 1024² 出图后缩到 512² |
 | 默认负面词 | 质量词 + 手部/肢体硬约束始终生效：`bad hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, extra limbs, bad proportions …`；自定义 negative 只能**追加**，不能替换 |
+| 限流 | 跟唱歌插件一个规矩：一个人 60 分钟只能请求画一次（`requester` 记 QQ 号），vip 名单（默认 `2220222310`）不限；生成失败会自动退还名额 |
 | R18 硬闸 | 每张图带 rating sidecar，发送时由 qq-bridge 的 r18-guard 判定，群聊默认发不出去 |
 
 ## 环境要求
@@ -91,6 +92,7 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | `variants` | number | 一次出几张，1-4，默认 1 |
 | `rating` | `sfw` / `nsfw` | 默认 sfw；nsfw 写 `rating=r18` 的 sidecar |
 | `target` | string | `group:群号` / `private:QQ号`，给了就出图后自动发送 |
+| `requester` | string | 点图人的 QQ 号（QQ 会话里必填发送者 QQ）。限流按它记账：默认一人 60 分钟一次，vip 名单不限；不传不限流 |
 | `note` | string | 备注（谁要的/什么梗），写进元数据 |
 
 返回 JSON（`execute` 的 payload 会被渲染成文本给模型）：
@@ -170,6 +172,9 @@ patch 里 `config` 可覆盖（全部有默认值，**没有任何必须手填�
 | `maxVariants` | `4` | 单次最多几张（1-4） |
 | `steps` / `cfg` | `28` / `5.5` | 工具参数没传时的默认值 |
 | `vramMode` | `auto` | `auto` / `full`（整卡） / `offload`（cpu_offload） |
+| `drawCooldownMinutes` | `60` | 限流窗口：一个人多少分钟内只能请求画一次；0 = 关闭限流 |
+| `drawCooldownMax` | `1` | 窗口内最多几次（和唱歌那套一致，默认 1） |
+| `vipList` | `["2220222310"]` | 不限流量的 QQ 号，数组或 `"1,2 3"` 字符串 |
 
 相对路径都按插件根目录解析。
 
@@ -209,6 +214,14 @@ patch 里 `config` 可覆盖（全部有默认值，**没有任何必须手填�
 - bridge 模块缺失时 **fail-closed**（宁可拒发）；被拒时图仍在本地，`payload.sentError` 会说明原因。
 - 别用「换 target / 换工具」绕过闸；agent 侧的系统提示也明确写了这一点。
 
+## 限流（跟唱歌一个规矩）
+
+- `draw_image` 的 `requester` 传点图人的 QQ 号；按 QQ 号记账（跨群、跨私聊算一个人），默认一人 60 分钟一次。
+- vip 名单（`vipList`，默认 `2220222310`）完全不记账，不限次数。
+- 先占名额再出图；生成失败（OOM / 超时 / 落盘失败）会退还名额，不会让人白等一小时。
+- 台账写在 `data/state/draw-cooldown.json`；被拦时返回 `error.code = RATE_LIMITED` 和 `retryAfterSec`。
+- 没有 `requester` 就不限流（本地/主会话直接画图不受影响）。
+
 ## 排障
 
 1. 先 `draw_status`：能区分「没装好」「worker 没起来」「冷却中」「队列忙」。
@@ -224,6 +237,7 @@ patch 里 `config` 可覆盖（全部有默认值，**没有任何必须手填�
 | `COOLDOWN` | worker 连续崩溃 3 次进入 60s 冷却；看 `worker.log` |
 | `START_TIMEOUT` / `OP_TIMEOUT` | 启动 / 出图超时；看日志确认是不是卡在模型加载 |
 | `BAD_REQUEST` | 参数不对（prompt 空、target 格式、resize 非 8 倍数等），按提示改 |
+| `RATE_LIMITED` | 这个人刚画过：按 `retryAfterSec` 告诉对方还要等多久；别换号/别重试 |
 | `sentError` | 图已生成但 QQ 发送失败：查 bridge 是否在跑、target 是否在白名单、R18 闸 |
 
 空闲自动退出后第一次出图会重新加载模型（`engine.cold=true`、`loadSec>0`），这是预期行为。
@@ -233,7 +247,7 @@ patch 里 `config` 可覆盖（全部有默认值，**没有任何必须手填�
 ```powershell
 cd <dsh-lab>\plugins\dsh-fish-paint
 node --check index.js
-node --test test/          # 35 个用例：engine 12 / presets 10 / store 7 / index 6
+node --test test/          # 49 个用例：engine 12 / presets 10 / store 7 / index 6 / qq 6 / ratelimit 8
 ```
 
 - `test/engine.test.mjs` 用 `test/fake-worker.mjs`（一个按 CONTRACT §3 协议说话的 Node 假 worker）
@@ -245,6 +259,8 @@ node --test test/          # 35 个用例：engine 12 / presets 10 / store 7 / i
   把目录参数当入口模块执行，它会自动 import 所有 `*.test.mjs`。
 - `test/store.test.mjs` 验证 sidecar 文件名必须是 `<png 绝对路径>.meta.json`、sfw→all / nsfw→r18、
   index.jsonl 追加、`listRecent` 的 date/target/limit 过滤，以及删掉 index 后回退扫元数据。
+- `test/ratelimit.test.mjs` 覆盖 QQ 号归一、vip 名单解析、同人冷却/过期放行/不同人互不影响、
+  失败退名额、max>1、坏 JSON 当空状态（限流放行不报错）。
 
 ## 目录结构
 
@@ -256,6 +272,7 @@ dsh-fish-paint/
 │  ├─ engine.js        常驻 worker 管理：JSONL、串行、重启、冷却、空闲退出、pid
 │  ├─ presets.js       预设/质量词/负面词/参数归一（纯函数）
 │  ├─ store.js         落盘、元数据、rating sidecar、index.jsonl
+│  ├─ ratelimit.js     画画限流台账（一人 N 分钟一次，vip 不限）
 │  └─ qq.js            QQ 投递 + bridge r18-guard 硬闸
 ├─ engine/
 │  ├─ worker.py        Python 侧 diffusers worker（CONTRACT §3 协议）
@@ -276,7 +293,7 @@ dsh-fish-paint/
 - 真发 QQ：sfw 发 owner 私聊成功（含 2 张分批）；nsfw sidecar 发非白名单群被 r18-guard 拒绝且图未丢。
 - `draw_setup action=verify` 512² 冒烟 15.2s；`draw_recent`、sidecar、同名 metadata、index.jsonl 均正确。
 - 插件已 `install_bundle` 进 profile，`ctx.effect` / `tools.register` / systemPrompt 注入在宿主里真实生效。
-- `node --test test/` = 35 pass / 0 fail；`node --check` 全过。
+- `node --test test/` = 49 pass / 0 fail；`node --check` 全过。
 
 **已知限制：**
 
