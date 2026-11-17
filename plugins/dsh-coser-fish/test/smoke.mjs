@@ -44,5 +44,5 @@ if (image || messageId) {
   const value = await find.execute(args)
   console.log(`\n=== fish_find（${((Date.now() - started) / 1000).toFixed(1)}s）===`)
   console.log(value.summary)
-  console.log(JSON.stringify({ accounts: value.accounts, enginesUsed: value.enginesUsed, failures: value.failures, cached: value.cached, image: value.image }, null, 2))
+  console.log(JSON.stringify({ accounts: value.accounts, enginesUsed: value.enginesUsed, failures: value.failures, cached: value.cached, xSearch: value.xSearch, image: value.image }, null, 2))
 }

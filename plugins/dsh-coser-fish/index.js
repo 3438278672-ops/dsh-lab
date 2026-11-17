@@ -19,7 +19,11 @@ import {
   ENGINES_VERSION,
   ENGINE_IDS,
   extractAccounts,
+  FIND_VERSION,
   formatReply,
+  PLATFORM_INFO,
+  PLATFORM_ORDER,
+  rankAccounts,
   readJsonFile,
   reverseSearch,
   sha256Hex,
@@ -279,8 +283,10 @@ async function readQQImage({ qqKey, qqMessageId, agentToken }, cfg) {
 
 // ── 缓存 ──────────────────────────────────────────────────────────────────
 
+// key 里带 FIND_VERSION（结论口径版本），条目里也写一份 —— 只靠 key 前缀容易忘，
+// 条目自带版本才能在读的时候兜住「旧格式结论」。
 function cacheKeyOf(bytes, engines) {
-  return `${sha256Hex(bytes)}:${ENGINES_VERSION}:${[...engines].sort().join(',')}`
+  return `${sha256Hex(bytes)}:${ENGINES_VERSION}:${FIND_VERSION}:${[...engines].sort().join(',')}`
 }
 
 function readCache() {
@@ -353,9 +359,16 @@ const WEIBO_RESERVED = new Set([
   'attitude', 'aj', 'sign', 'mp', 's', 'fav', 'like', 'comment', 'detail', 'weibo', 'hot',
 ])
 
-function socialFromSource(source) {
+/**
+ * 从一条搜索结果里认出社媒账号。
+ * @param {{url?: string, title?: string, snippet?: string}} source
+ * @param {{allow?: string[]|null}} [options] allow = 只接受这些平台（搜索阶梯用来把「X 阶段」锁死在 X 上）
+ */
+function socialFromSource(source, { allow = null } = {}) {
+  const allowed = Array.isArray(allow) && allow.length ? new Set(allow) : null
   const url = String(source?.url ?? '')
   for (const rule of SOCIAL_RES) {
+    if (allowed && !allowed.has(rule.platform)) continue
     const hit = url.match(rule.re)
     if (!hit) continue
     const handle = hit[1]
@@ -363,7 +376,8 @@ function socialFromSource(source) {
     if (rule.platform === 'weibo' && WEIBO_RESERVED.has(handle.toLowerCase())) continue
     return { platform: rule.platform, handle, url: rule.url(handle) }
   }
-  // 粉丝站（twfan / twiman / claps 等）的标题常直接写「名字（@handle）」。
+  // 粉丝站（twfan / twiman / claps 等）的标题常直接写「名字（@handle）」—— 这只会是 X。
+  if (allowed && !allowed.has('twitter')) return null
   for (const field of [source?.title, source?.snippet]) {
     const hit = String(field ?? '').match(X_AT_RE)
     if (hit && !X_RESERVED.has(hit[1].toLowerCase())) {
@@ -410,59 +424,96 @@ function xNameVariants(name) {
   return out.slice(0, 2)
 }
 
-async function searchSocialByName(names, { timeoutMs = 20000 } = {}) {
-  if (!webSearch || !names.length) return []
+// ── 名字 → 社媒：先 X（推特），X 没有才看微博 / B站 ─────────────────────
+//
+// 用户口径（2026-11-08）：优先在 X 上搜，X 找不到再往下降。
+// 阶梯必须**整级跑完再降级**：所有名字的 X 都试过、都没有，才去搜微博 / B站；
+// 某一级有命中，整条名字搜索就停在这里。
+// Pixiv 不参与名字搜索：图搜引擎会直接给出图源作者，拿名字去搜 pixiv 多半是同名画师。
+const NAME_SEARCH_STAGES = [['twitter'], ['weibo', 'bilibili']]
+
+const NAME_SEARCH_TAILS = {
+  twitter: ['Twitter 账号', 'site:x.com', 'コスプレ twitter'],
+  weibo: ['微博 账号'],
+  bilibili: ['B站 账号'],
+}
+
+/**
+ * 按作者名去网上捞社媒号，**先 X、X 没有才降级微博 / B站**（NAME_SEARCH_STAGES）。
+ *
+ * 返回 `{ accounts, ok, queries }`：
+ * - `ok` = 至少有一次搜索请求真的跑通了。宿主搜索服务不可用时是 false ——
+ *   调用方必须据此把「X 上没搜到」和「这次压根搜不了 X」分开说，不能混为一谈。
+ * - `queries` = 成功返回的请求数（调试/测试用）。
+ */
+async function searchSocialByName(names, { timeoutMs = 20000, stages = NAME_SEARCH_STAGES } = {}) {
+  if (!webSearch || !names.length) return { accounts: [], ok: false, queries: 0 }
   const budget = Date.now() + timeoutMs
   const found = []
   const seen = new Set()
-  for (const name of names) {
-    const queries = []
-    const variants = xNameVariants(name)
-    const tails = ['Twitter 账号', 'コスプレ twitter', '微博 账号']
-    for (const variant of variants.slice(0, 1)) {
-      for (const tail of tails) queries.push(`${variant} ${tail}`)
-    }
-    for (const query of queries) {
-      const left = Math.min(10000, budget - Date.now())
-      if (left < 2000) break
-      let result
-      try {
-        result = await withTimeout(webSearch(query, 8), left)
-      } catch {
-        continue
+  let ok = false
+  let queries = 0
+  for (const platforms of stages) {
+    const stageStart = found.length
+    for (const name of names) {
+      if (Date.now() >= budget) break
+      const variants = xNameVariants(name)
+      for (const variant of variants.slice(0, 1)) {
+        let confirmed = false
+        for (const platform of platforms) {
+          if (confirmed) break
+          for (const tail of NAME_SEARCH_TAILS[platform] ?? [platform]) {
+            const left = Math.min(10000, budget - Date.now())
+            if (left < 2000) {
+              confirmed = true
+              break
+            }
+            let result
+            try {
+              result = await withTimeout(webSearch(`${variant} ${tail}`, 8), left)
+              ok = true
+              queries += 1
+            } catch {
+              continue
+            }
+            const sources = Array.isArray(result?.sources) ? result.sources : []
+            let hit = null
+            for (const source of sources) {
+              // allow 锁死当前平台：X 阶段就算搜到微博链接也不能采纳。
+              const social = socialFromSource(source, { allow: [platform] })
+              if (!social || seen.has(`${social.platform}:${social.handle.toLowerCase()}`)) continue
+              // 「同名」必须能在标题/摘要里看到，否则就是撞了别人的号（宁缺毋滥）。
+              const text = `${source?.title ?? ''} ${source?.snippet ?? ''}`
+              if (!variants.some((value) => text.includes(value))) continue
+              hit = { ...social, source }
+              break
+            }
+            if (!hit) continue
+            seen.add(`${hit.platform}:${hit.handle.toLowerCase()}`)
+            found.push({
+              platform: hit.platform,
+              handle: hit.handle,
+              url: hit.url,
+              authorName: name,
+              // 名字搜出来的号是推断，不是这张图直接命中的账号 —— 格式化层会标「（推断，未核实）」。
+              confidence: 'inferred',
+              evidence: {
+                engine: 'name-search',
+                similarity: null,
+                sourceUrl: String(hit.source?.url ?? ''),
+                note: `按名字「${name}」搜到的账号，没跟这张图逐条核实`,
+              },
+            })
+            confirmed = true
+            break // 这个名字在这个平台上找到了，换下一个名字
+          }
+        }
       }
-      const sources = Array.isArray(result?.sources) ? result.sources : []
-      let hit = null
-      for (const source of sources) {
-        const social = socialFromSource(source)
-        if (!social || seen.has(`${social.platform}:${social.handle.toLowerCase()}`)) continue
-        // 「同名」必须能在标题/摘要里看到，否则就是撞了别人的号（宁缺毋滥）。
-        const text = `${source?.title ?? ''} ${source?.snippet ?? ''}`
-        const looksSame = variants.some((variant) => text.includes(variant))
-        if (!looksSame) continue
-        hit = { ...social, source }
-        break
-      }
-      if (!hit) continue
-      seen.add(`${hit.platform}:${hit.handle.toLowerCase()}`)
-      found.push({
-        platform: hit.platform,
-        handle: hit.handle,
-        url: hit.url,
-        authorName: name,
-        // 名字搜出来的号是推断，不是这张图直接命中的账号 —— 格式化层会标「（推断，未核实）」。
-        confidence: 'inferred',
-        evidence: {
-          engine: 'name-search',
-          similarity: null,
-          sourceUrl: String(hit.source?.url ?? ''),
-          note: `按名字「${name}」搜到的账号，没跟这张图逐条核实`,
-        },
-      })
-      break // 这个名字找到就够了，不再换 query
     }
+    // 这一级有命中就停：X 上有结果就永远不去搜微博 / B站。
+    if (found.length > stageStart) break
   }
-  return found.slice(0, 2)
+  return { accounts: found.slice(0, 2), ok, queries }
 }
 
 async function runFind(args, cfg) {
@@ -488,9 +539,11 @@ async function runFind(args, cfg) {
 
   const key = cacheKeyOf(image.bytes, reach.usable)
   const cache = readCache()
-  const hit = args.noCache ? null : cacheGet(cache, key, Date.now(), { cacheDays: cfg.cacheDays })
+  const hit = args.noCache ? null : cacheGet(cache, key, Date.now(), { cacheDays: cfg.cacheDays, version: FIND_VERSION })
   if (hit) {
-    const accounts = Array.isArray(hit.accounts) ? hit.accounts : []
+    // 旧缓存里的账号顺序是改造前的（pixiv 可能排在前面）—— 读出来先按新契约重排再展示。
+    const accounts = rankAccounts(Array.isArray(hit.accounts) ? hit.accounts : [])
+    const xSearch = hit.xSearch ?? null
     return {
       summary:
         formatReply({
@@ -498,11 +551,13 @@ async function runFind(args, cfg) {
           enginesUsed: hit.enginesUsed ?? [],
           failures: hit.failures ?? [],
           cached: true,
+          xSearch,
         }) + skippedNoteOf(hit.failures),
       accounts,
       enginesUsed: hit.enginesUsed ?? [],
       failures: hit.failures ?? [],
       cached: true,
+      xSearch,
       elapsedMs: Date.now() - started,
       image: { source: image.source, bytes: image.bytes.length, mimeType: image.mimeType },
     }
@@ -515,31 +570,48 @@ async function runFind(args, cfg) {
     browserExe: cfg.browserExe || '',
   })
   const failures = [...result.failures, ...reach.skipped]
-  const imageAccounts = extractAccounts(result.candidates, { max: maxAccounts, strictNames: strict })
+  const imageAccounts = rankAccounts(extractAccounts(result.candidates, { max: maxAccounts, strictNames: strict }))
   // 只翻到画作账号（pixiv）时，再按作者名去网上捞社媒：coser 的真身基本都在推特/微博/B站。
+  // 名字搜索本身也是「先 X、X 没有才降级微博 / B站」（见 NAME_SEARCH_STAGES）。
   const xEnabled = args.xSearch === false ? false : cfg.xSearch !== false
-  const xAccounts = xEnabled && !imageAccounts.some((item) => item?.platform === 'twitter')
-    ? await searchSocialByName(xSearchNames(imageAccounts, result.candidates), { timeoutMs: Math.min(25000, timeoutMs) })
-    : []
-  const accounts = (xAccounts.length ? [...xAccounts, ...imageAccounts] : imageAccounts).slice(0, 5)
+  const wantsNameSearch = xEnabled && !imageAccounts.some((item) => item?.platform === 'twitter')
+  const names = wantsNameSearch ? xSearchNames(imageAccounts, result.candidates) : []
+  const nameSearch = names.length
+    ? await searchSocialByName(names, { timeoutMs: Math.min(25000, timeoutMs) })
+    : { accounts: [], ok: false, queries: 0 }
+  const xAccounts = nameSearch.accounts
+  // 排序是最终契约：哪怕 X 号只是「推断」，它也是本人社媒，要排在只代表画作作者的 pixiv 前面。
+  const accounts = rankAccounts([...xAccounts, ...imageAccounts]).slice(0, maxAccounts)
+  // tried = 真的按名字搜过；searched = 搜索服务可用、请求跑通了。
+  // 二者必须分开：搜了没搜到，和压根搜不了 X，对用户是两回事。
+  const xSearch = { tried: names.length > 0, found: xAccounts.length, searched: nameSearch.ok }
   const summary = formatReply({
     accounts,
     candidates: result.candidates,
     enginesUsed: result.enginesUsed,
     failures,
     cached: false,
+    xSearch,
   }) + skippedNoteOf(failures)
 
   // 只缓存「结论」，不缓存整坨候选页面 —— 缓存文件要小，读起来要快。
   // 也不缓存「跳过某引擎」这类本次网络状况，免得 30 天后还在说 lens 连不上。
-  const next = cachePut(
-    cache,
-    key,
-    { accounts, enginesUsed: result.enginesUsed, failures: result.failures },
-    Date.now(),
-    { cacheMax: cfg.cacheMax },
-  )
-  saveCache(next, cfg)
+  // 「完整」的定义：所有参与的引擎都跑通了，且名字搜索要么不需要、要么跑通了。
+  //   · 有引擎 521/超时 → 这是网络撞墙，不是「这张图没源」；
+  //   · 名字搜索没跑通 → 是宿主搜索服务不可用，不是「X 上没有」。
+  // 这两类不完整结论一进缓存就会 30 天不再重试，所以一律不写。
+  const enginesComplete = result.enginesUsed.length === reach.usable.length
+  const namesComplete = !xSearch.tried || xSearch.searched
+  if (enginesComplete && namesComplete) {
+    const next = cachePut(
+      cache,
+      key,
+      { accounts, enginesUsed: result.enginesUsed, failures: result.failures, xSearch },
+      Date.now(),
+      { cacheMax: cfg.cacheMax, version: FIND_VERSION },
+    )
+    saveCache(next, cfg)
+  }
 
   return {
     summary,
@@ -547,6 +619,7 @@ async function runFind(args, cfg) {
     enginesUsed: result.enginesUsed,
     failures,
     cached: false,
+    xSearch,
     elapsedMs: Date.now() - started,
     image: { source: image.source, bytes: image.bytes.length, mimeType: image.mimeType },
   }
@@ -622,7 +695,8 @@ export function apply(ctx, config) {
         '本插件提供 fish_find 与 fish_check（鱼鱼找鸡）：给一张图反查这个 coser 的社媒账号（推特/微博/B站/Instagram/Pixiv）。' +
         '本机或网上的图传 image；QQ 会话里「被引用的那张图」传 qqKey（group:群号 / private:QQ号）+ qqMessageId，插件自己向本机 qq-bridge 取原图，不用先落盘。' +
         '默认引擎 saucenao+tracemoe（直连、几秒出结果）；要更准可加 lens 并配代理（本机直连 lens 不通，插件会自动跳过并说明）。' +
-        '这两个引擎只索引画作/动画截图，只命中 pixiv 很常见；这时插件会按作者名去网上再搜一遍推特 / 微博 / B 站，给的是「推断，未核实」的号。' +
+        '这两个引擎只索引画作/动画截图，只命中 pixiv 很常见；这时插件会按作者名去网上搜，顺序是「先 X（推特）→ X 没有再看微博 / B站」，给的是「推断，未核实」的号。' +
+        'Pixiv 只作图源作者兜底：会标明「画作平台，非本人社交号」，并排在 X / 微博 / B站 之后。' +
         '同一张图 30 天内命中本地缓存会秒回。要判断环境能不能跑（外网、浏览器、QQ 桥令牌、缓存）用 fish_check。',
     }),
   )
@@ -632,8 +706,8 @@ export function apply(ctx, config) {
       name: 'fish_find',
       description:
         '鱼鱼找鸡：用一张图反查 coser 的社媒账号（推特/微博/B站/Instagram/Pixiv）。' +
-        '图片二选一：image=本机绝对路径或 http(s) 图片地址；或者 qqKey（如 group:123456789 / private:100000002）+ qqMessageId（被引用那条消息的 messageId 或本地 seq），插件直接向本机 qq-bridge 取原图。' +
-        'saucenao/tracemoe 只索引画作和动画截图，所以只命中 pixiv 是常态；这时插件会自动按作者名再搜一遍外网，捞推特 / 微博 / B 站 / Instagram 的号，给的是「推断，未核实」（xSearch:false 可关）。' +
+        '图片二选一：image=本机绝对路径或 http(s) 图片地址；或者 qqKey（如 group:1104418054 / private:2220222310）+ qqMessageId（被引用那条消息的 messageId 或本地 seq），插件直接向本机 qq-bridge 取原图。' +
+        'saucenao/tracemoe 只索引画作和动画截图，所以只命中 pixiv 是常态；这时插件会自动按作者名再搜一遍外网，**先 X（推特）**，X 上没有才降级到微博 / B站，给的是「推断，未核实」（xSearch:false 可关）。Pixiv 只作图源作者兜底：会标明「画作平台，非本人社交号」，并排在 X / 微博 / B站 之后。' +
         'engines 默认 saucenao+tracemoe（直连，几秒出结果）；要更准就加 lens：engines:["lens","saucenao","tracemoe"] 并传 proxy=http://127.0.0.1:10090（lens 要外网；直连不通时插件会跳过它并说明原因）。动漫截图可用 tracemoe/iqdb，同人图用 saucenao。' +
         '单次约 10–60 秒，内部串行排队；同一张图 30 天内命中缓存会秒回（cached=true）。' +
         '返回 summary（能直接发给人看的人话）与 accounts（结构化账号）。环境先自检用 fish_check。',
@@ -652,7 +726,7 @@ export function apply(ctx, config) {
           timeoutSec: { type: 'integer', description: '单个引擎超时（秒），5-180，默认 45' },
           proxy: { type: 'string', description: '只给浏览器（Lens/百度/必应/Yandex）用的代理，如 http://127.0.0.1:10090；空=直连' },
           strict: { type: 'boolean', description: 'true（默认）=名字对不上的别人的号不报；false=全报出来自己挑' },
-          xSearch: { type: 'boolean', description: 'true（默认）=只翻到画作账号时，再按作者名去网上搜推特/微博/B站/Instagram，给出「推断，未核实」的号；false=只要图直接命中的账号' },
+          xSearch: { type: 'boolean', description: 'true（默认）=只翻到画作账号时，再按作者名去网上搜：先 X（推特），X 没有才降级到微博 / B站，给出「推断，未核实」的号；false=只要图直接命中的账号' },
           noCache: { type: 'boolean', description: 'true=跳过本地缓存重新查' },
           agentToken: { type: 'string', description: '可选：QQ 二代会话令牌；不传时自动从 qq-bridge 的 state/social-v2.json 里按会话取' },
         },
@@ -686,6 +760,11 @@ export function apply(ctx, config) {
                 properties: { engine: { type: 'string' }, reason: { type: 'string' } },
                 additionalProperties: true,
               },
+            },
+            xSearch: {
+              type: 'object',
+              properties: { tried: { type: 'boolean' }, found: { type: 'integer' } },
+              additionalProperties: true,
             },
             cached: { type: 'boolean' },
             elapsedMs: { type: 'integer' },
@@ -752,6 +831,10 @@ export function apply(ctx, config) {
 
 // 给 test/social.mjs 用的内部钩子：不联网就能验证「搜索结果 → 社媒账号」这一层的规则。
 export const __internals = {
+  FIND_VERSION,
+  NAME_SEARCH_STAGES,
+  cacheKeyOf,
+  rankAccounts,
   socialFromSource,
   xNameVariants,
   xSearchNames,

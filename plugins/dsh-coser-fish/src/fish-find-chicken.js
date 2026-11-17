@@ -190,6 +190,12 @@ const BROWSER_ENGINES = new Set(['yandex', 'bing', 'baidu', 'google']);
 // 全部失效 —— 否则同一张图会一直吃老结果，看起来「改了跟没改一样」。
 export const ENGINES_VERSION = 3;
 
+// 结论口径版本：账号排序（先 X 后 Pixiv）、名字搜索阶梯（先 X 再降级）、
+// Pixiv「画作平台」标注、xSearch 结构都算结论的一部分。
+// 这个版本号同时写进缓存条目（entry.version），读的时候对不上就当没缓存 ——
+// 只靠 key 前缀容易忘，条目自带版本才能保证「旧结论永远不会冒充新结论」。
+export const FIND_VERSION = 2;
+
 // ── 小工具 ────────────────────────────────────────────────────────────────
 // 计时器不 unref：unref 后独自跑脚本时会「事件循环空了」直接退出（exit 13）。
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -1248,14 +1254,55 @@ const PLATFORM_RULES = [
 // bilibili 的图文/视频页里带作者 mid 时才算 direct
 const BILIBILI_AUTHOR_RE = /\/(?:opus|video|read)\/.*?(?:mid=|space\.bilibili\.com\/)(\d{3,})/i;
 
-// 同分时的平台顺序：微博 → B站 → Twitter → Instagram → Pixiv。
-// 按「国内 coser 最可能留号的地方」排，回话里第 1 条就是最可能有用的那个。
-// 真人 coser 的号绝大部分在推特，微博其次；Pixiv 是画作平台（画师的作品页），
-// 不是「这个人自己的社交账号」，所以排在最后，回话里也要标出来。
-const PLATFORM_WEIGHT = { twitter: 1, weibo: 2, bilibili: 3, instagram: 4, pixiv: 9 };
+// ── 平台优先级（唯一事实源）──────────────────────────────────────────────
+//
+// 用户口径（2026-11-08）：先 X（推特），X 没有才看 P 站（pixiv）。
+// 排序、名字搜索阶梯、展示标签全部从下面这一份有序列表派生 ——
+// 别再在调用点另写权重或 if，否则「谁排第一」会出现两套口径。
+export const PLATFORM_ORDER = ['twitter', 'weibo', 'bilibili', 'instagram', 'pixiv'];
+
+export const PLATFORM_INFO = {
+  twitter: { label: 'Twitter / X', artwork: false, social: true },
+  weibo: { label: '微博', artwork: false, social: true },
+  bilibili: { label: 'B站', artwork: false, social: true },
+  instagram: { label: 'Instagram', artwork: false, social: true },
+  // pixiv 上的是画师作品页/会员号，不是 coser 本人的社交账号 —— 它只是「图源作者」。
+  pixiv: { label: 'Pixiv（画作平台）', artwork: true, social: false }
+};
+
+// 由 PLATFORM_ORDER 派生，数字越小越靠前；不在表里的平台排最后。
+export const PLATFORM_WEIGHT = Object.fromEntries(
+  PLATFORM_ORDER.map((platform, index) => [platform, index + 1])
+);
 
 // 画作平台：pixiv 上的是画师的作品/会员号，不是 coser 的主页。
-const ARTWORK_PLATFORMS = new Set(['pixiv']);
+export const ARTWORK_PLATFORMS = new Set(
+  PLATFORM_ORDER.filter((platform) => PLATFORM_INFO[platform]?.artwork)
+);
+
+const CONFIDENCE_ORDER = { direct: 0, weak: 1, inferred: 2 };
+
+/**
+ * 统一排序口径：**先平台（X → 微博 → B站 → IG → Pixiv），同平台再 direct > weak > inferred，
+ * 最后按相似度降序**。展示、截断、缓存读回都用这一个函数。
+ *
+ * 这是有意让「按名字推断出来的 X 号」排在「图直接命中的 Pixiv 作者」前面 ——
+ * 用户要的是先看 X；推断号在回话里带「（推断，未核实）」，不会被当成已核实。
+ */
+export function rankAccounts(accounts) {
+  return [...(Array.isArray(accounts) ? accounts : [])].sort((a, b) => {
+    const pa = PLATFORM_WEIGHT[a?.platform] ?? 99;
+    const pb = PLATFORM_WEIGHT[b?.platform] ?? 99;
+    if (pa !== pb) return pa - pb;
+    const ca = CONFIDENCE_ORDER[String(a?.confidence ?? '')] ?? 3;
+    const cb = CONFIDENCE_ORDER[String(b?.confidence ?? '')] ?? 3;
+    if (ca !== cb) return ca - cb;
+    const sa = Number(a?.evidence?.similarity ?? -1);
+    const sb = Number(b?.evidence?.similarity ?? -1);
+    if (Number.isFinite(sa) && Number.isFinite(sb) && sb !== sa) return sb - sa;
+    return 0;
+  });
+}
 
 // 「看着像账号、其实是页面」的路径前缀 —— 百度识图/搜索结果里这类链接特别多，
 // 不挡掉就会把 `weibo.com/ttarticle/p/show?id=…` 当成一个叫 ttarticle 的账号报出去。
@@ -1472,17 +1519,8 @@ export function extractAccounts(candidates, { max = 3, onDrop = null, strictName
     }
   }
 
-  // 排序：direct → weak（相似图）→ inferred；同级再按相似度降序、平台顺序
-  keptList.sort((a, b) => {
-    const ra = rank(a);
-    const rb = rank(b);
-    if (ra !== rb) return ra - rb;
-    const sa = a.evidence?.similarity ?? -1;
-    const sb = b.evidence?.similarity ?? -1;
-    if (sb !== sa) return sb - sa;
-    return (PLATFORM_WEIGHT[a.platform] ?? 9) - (PLATFORM_WEIGHT[b.platform] ?? 9);
-  });
-  return keptList.slice(0, Math.max(1, Number(max) || 3));
+  // 排序与截断都走统一口径：平台优先级第一（X 最前、Pixiv 垫底），平台内 direct → weak → inferred。
+  return rankAccounts(keptList).slice(0, Math.max(1, Number(max) || 3));
 }
 
 /** 画作平台的「相似画作」不等于图源：相似度不够的一律丢，别当 coser 的号报出去。 */
@@ -1501,8 +1539,33 @@ export function dropWeakArtwork(accounts, minSimilarity = 0.8) {
 }
 
 function platformLabel(platform) {
-  const name = ({ twitter: 'Twitter', weibo: '微博', bilibili: 'B站', instagram: 'Instagram', pixiv: 'Pixiv' })[platform] ?? platform;
-  return ARTWORK_PLATFORMS.has(platform) ? `${name}（画作平台）` : name;
+  return PLATFORM_INFO[platform]?.label ?? String(platform ?? '未知');
+}
+
+/**
+ * 「先 X 后 P」这条链路的解释文案。
+ * 回话里第一栏不是 X 时，用户有权知道是「X 上没这个人」还是「压根没搜 X」——
+ * 这两种情况看起来一样，但意义完全不同。
+ */
+function xSearchHint(list, xSearch) {
+  const tried = Boolean(xSearch?.tried);
+  // 没给 searched（老调用/老结论）时按「搜过」处理，否则会把旧结论误说成搜索服务不可用。
+  const searched = xSearch?.searched !== false;
+  if (list.some((account) => account?.platform === 'twitter')) return '';
+  const hasArtwork = list.some((account) => ARTWORK_PLATFORMS.has(account?.platform));
+  const missed = tried && searched;
+  const unavailable = tried && !searched;
+  if (!list.length) {
+    if (missed) return 'X（推特）上按作者名也没搜到号。';
+    if (unavailable) return '这次没能搜 X（宿主搜索服务不可用），只看了图搜的结果。';
+    return '';
+  }
+  if (hasArtwork) {
+    if (missed) return 'X（推特）上按作者名没搜到号；Pixiv 那条只是画作作者（画师作品页），不是 coser 本人的社交号。';
+    if (unavailable) return '这次没能搜 X（宿主搜索服务不可用）；Pixiv 那条只是画作作者（画师作品页），不是 coser 本人的社交号。';
+    return 'Pixiv 那条只是画作作者（画师作品页），不是 coser 本人的社交号；真人号一般在 X（推特）。';
+  }
+  return missed ? 'X（推特）上按作者名没搜到号，下面是微博 / B站的结果。' : '';
 }
 
 // ── inferred 账号（搜索交叉验证，最多 2 个） ──────────────────────────────
@@ -1510,7 +1573,8 @@ function platformLabel(platform) {
 // 口径：**direct 优先且必须已有 direct**。只有「同一作品/作者名 + 同平台账号页」
 // 在同一份搜索结果里同时出现时才采纳，否则丢弃 —— 宁缺毋滥，绝不凭名字猜 handle。
 
-const INFER_PLATFORMS = ['twitter', 'weibo', 'bilibili'];
+// 名字推断只跑这三个平台；顺序从 PLATFORM_ORDER 派生（X 永远第一个试）。
+const INFER_PLATFORMS = PLATFORM_ORDER.filter((platform) => ['twitter', 'weibo', 'bilibili'].includes(platform));
 const INFER_QUERY_HINT = { weibo: '微博', twitter: 'Twitter', bilibili: 'B站' };
 
 /** 从候选标题里剥出「像作者名」的片段（去掉【分组】【漫画】这类方括号内容）。 */
@@ -1611,8 +1675,9 @@ export async function inferAccounts({ accounts = [], candidates = [], search, ma
     .filter((platform) => !direct.some((item) => item.platform === platform));
   const out = [];
 
-  for (const name of names) {
-    for (const platform of wanted) {
+  // 先 X 后其他：外层平台、内层名字 —— 所有名字的 X 都试过，才降级到微博 / B站。
+  for (const platform of wanted) {
+    for (const name of names) {
       if (out.length >= max) return out;
       let results = [];
       try {
@@ -1681,7 +1746,7 @@ function displayHandle(account) {
  *   🆔 账号：…（主页链接跟在账号后面，方便点开核对）
  * 多个账号之间空一行；inferred 的账号在账号行尾标「推断」。
  */
-export function formatReply({ accounts = [], candidates = [], enginesUsed = [], failures = [], cached = false, withImage = false, artworkDropped = 0, nameDropped = 0, consensusName = '', droppedHandles = [] } = {}) {
+export function formatReply({ accounts = [], candidates = [], enginesUsed = [], failures = [], cached = false, withImage = false, artworkDropped = 0, nameDropped = 0, consensusName = '', droppedHandles = [], xSearch = null } = {}) {
   const list = Array.isArray(accounts) ? accounts : [];
   // 认出主轴时，优先给「写着这个人名字」的原帖：那才是你要顺着找的那条。
   const pool = (Array.isArray(candidates) ? candidates : []).filter((c) => c?.sourceUrl);
@@ -1713,10 +1778,9 @@ export function formatReply({ accounts = [], candidates = [], enginesUsed = [], 
     });
     const head = `🎯 **鱼鱼找鸡结果**${cached ? '（缓存）' : ''}`;
     let text = [head, '', blocks.join('\n\n')].join('\n');
-    // 只有画作平台的结果时，得说清楚这不是 coser 本人的号
-    if (list.every((account) => ARTWORK_PLATFORMS.has(account?.platform))) {
-      text += '\n\n· Pixiv 是画作平台（画师的作品页），不是 coser 本人的账号；真人号一般在推特';
-    }
+    // 先 X 后 P 的链路要交代清楚：第一栏不是 X 时，说明是「X 上没搜到」还是「只有画作作者」。
+    const hint = xSearchHint(list, xSearch);
+    if (hint) text += `\n\n· ${hint}`;
     if (text.length > 900) text = text.slice(0, 897) + '…';
     return text;
   }
@@ -1733,6 +1797,8 @@ export function formatReply({ accounts = [], candidates = [], enginesUsed = [], 
       ? `❌ 没查到账号。${tried}${cacheTag}翻到 ${candidates.length} 条相似图，但没有能确认的账号${why ? ' ' + why : ''}`
       : `❌ 没查到账号。${tried}${cacheTag}，都空——这种一般是私图、新图，或者裁过${why ? ' ' + why : ''}`;
   const lines = [`🎯 **鱼鱼找鸡结果**`, '', head];
+  const emptyHint = xSearchHint([], xSearch);
+  if (emptyHint) lines.push(emptyHint);
   if (Number(artworkDropped) > 0) {
     lines.push(`只翻到 ${Number(artworkDropped)} 张相似画作（相似度不够，没当成图源）；真人 coser 的号一般在推特`);
   }
@@ -1816,17 +1882,19 @@ export function cacheKeyFor(bytes, enginesVersion = ENGINES_VERSION) {
   return `${sha256Hex(bytes)}:${enginesVersion}`;
 }
 
-export function cacheGet(cache, key, now = Date.now(), { cacheDays = 30 } = {}) {
+export function cacheGet(cache, key, now = Date.now(), { cacheDays = 30, version = null } = {}) {
   const entry = cache && typeof cache === 'object' ? cache[key] : null;
   if (!entry || typeof entry !== 'object') return null;
+  // 结论口径对不上就当没缓存：旧排序 / 旧「没搜过 X」的结论不能冒充新结论。
+  if (version != null && entry.version !== version) return null;
   const ageDays = (now - Number(entry.at ?? 0)) / 86400000;
   if (!Number.isFinite(ageDays) || ageDays > Number(cacheDays ?? 30)) return null;
   return entry.result ?? null;
 }
 
-export function cachePut(cache, key, result, now = Date.now(), { cacheMax = 500 } = {}) {
+export function cachePut(cache, key, result, now = Date.now(), { cacheMax = 500, version = null } = {}) {
   const next = { ...(cache && typeof cache === 'object' ? cache : {}) };
-  next[key] = { at: now, result };
+  next[key] = { at: now, ...(version != null ? { version } : {}), result };
   const keys = Object.keys(next);
   const max = Math.max(1, Number(cacheMax) || 500);
   if (keys.length > max) {

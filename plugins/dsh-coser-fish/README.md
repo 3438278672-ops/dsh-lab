@@ -18,24 +18,36 @@
 | `timeoutSec` | 单引擎超时（5–180 秒，默认 45） |
 | `proxy` | 只给浏览器引擎用的代理，如 `http://127.0.0.1:10090` |
 | `strict` | 默认 `true`：名字对不上的别人的号不报；`false`：全报出来自己挑 |
-| `xSearch` | 默认 `true`：只翻到画作账号时，按作者名去外网再搜一遍推特/微博/B站/Instagram；`false`：只要图直接命中的账号 |
+| `xSearch` | 默认 `true`：只翻到画作账号时，按作者名去外网再搜 —— **先 X（推特），X 没有才降级微博 / B站**；`false`：只要图直接命中的账号 |
 | `noCache` | 跳过本地缓存重新查 |
 
-返回 `summary`（能直接发给用户的人话）+ `accounts`（`platform/handle/url/authorName/confidence`）。
+返回 `summary`（能直接发给用户的人话）+ `accounts`（`platform/handle/url/authorName/confidence`）+ `xSearch`（`tried`：是否真的按名字搜过；`found`：搜到几个；`searched`：搜索服务是否跑通）。
 同一张图 30 天内重复问会命中缓存（`cached: true`），不会重复烧 SauceNAO 的免费额度。
+引擎没跑通（HTTP 5xx / 超时）或名字搜索不可用时不写缓存 —— 那是环境问题，不是这张图的结论。
 
-### 名字 → 推特 / 微博 / B站（`xSearch`）
+### 名字 → 先 X（推特），没有再降级（`xSearch`）
 
 saucenao / tracemoe 是**画作库**，coser 本人的主页基本不在里头 —— 所以「只命中 pixiv」是常态，不是故障。
-这一层在拿到 pixiv 作者名之后，再用宿主的 `ctx.web.search` 反查一次（查询形如「<名字> Twitter 账号」「<名字> コスプレ twitter」「<名字> 微博 账号」），
-从结果里认 `x.com` / `twitter.com` / `weibo.com` / `space.bilibili.com` / `instagram.com` 链接，或粉丝站标题里的 `名字（@handle）`。
+这一层在拿到 pixiv 作者名之后，再用宿主的 `ctx.web.search` 反查，**严格按阶梯走**：
+
+1. 先把所有作者名的 X（推特）搜完（查询形如「<名字> Twitter 账号」「<名字> site:x.com」「<名字> コスプレ twitter」）；
+2. X 整级都没有，才降级搜微博 / B站。
+
+X 上有命中就停在这一级，不会再去搜微博 / B站。pixiv 不参与名字搜索 —— 图搜引擎已经直接给出了图源作者，拿名字去搜 pixiv 多半是同名画师。
 
 规矩（宁可少报也不瞎报）：
 
 - 结果标题或摘要里必须**能看到那个名字**，否则当成撞号丢弃；
+- 平台严格隔离：X 阶段搜到的微博链接不会被当成 X 号；
 - 一律标 `confidence: "inferred"`，输出时带「（推断，未核实）」；
 - 名字是画师本人时，捞到的是**画师的**推特，不一定是照片里那个 coser；
-- 同一张图的结果会被缓存，想重搜传 `noCache: true`。
+- 宿主搜索服务不可用时，回话会写「这次没能搜 X」，不会谎称「X 上没搜到」；
+- 这种不完整结论不写缓存；想重搜也可以传 `noCache: true`。
+
+### 展示顺序
+
+账号统一按 **X → 微博 → B站 → Instagram → Pixiv** 排，同平台再 `direct` > `weak` > `inferred`。
+Pixiv 是画作平台，不是本人社交号：平台会写成「Pixiv（画作平台）」，并在末尾说明「Pixiv 那条只是画作作者……」，真人号一般在 X。
 
 ### `fish_check` — 环境自检
 
@@ -57,7 +69,7 @@ saucenao / tracemoe 是**画作库**，coser 本人的主页基本不在里头 �
 在本机 qq-bridge（reserved2 模式）的会话里，引用一张图问「这是谁」，调用：
 
 ```
-fish_find qqKey="group:123456789" qqMessageId="<那条消息的 messageId 或 seq>"
+fish_find qqKey="group:1104418054" qqMessageId="<那条消息的 messageId 或 seq>"
 ```
 
 插件会自己读 `state/console-token` 和 `state/social-v2.json` 里该会话的 `agentToken`，
