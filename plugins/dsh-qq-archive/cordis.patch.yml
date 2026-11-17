@@ -1,5 +1,7 @@
 # dsh-qq-archive：QQ 群聊可检索记忆 + 人物档案
-# 配置留空 = 自动探测数据源、插件家目录默认 ~/.dsh/qq-archive。
+# 配置留空 = 自动探测数据源；数据目录（home）解析顺序：
+#   显式 home → 环境变量 QQ_ARCHIVE_HOME → 默认 ~/.dsh/qq-archive。
+# 测试进程（node --test）不允许隐式默认：必须显式传 home 或设 QQ_ARCHIVE_HOME。
 # 增强层（语音转写 / 图片描述 / 语义检索 / 人物印象）默认关，按需在 config 里打开。
 - insert:
     - id: qq-archive

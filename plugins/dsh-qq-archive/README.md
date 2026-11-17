@@ -9,6 +9,7 @@
 | `qq_find` | 在历史消息里搜：关键词、会话、发送者、时间、消息类型；可导出成 MD / HTML |
 | `qq_ask` | 用一句人话问：语义 + 关键词双路检索，模型作答并给出 `[n]` 引用 |
 | `qq_people` | 群友档案：在哪些群、说了多少话、常聊什么、和谁互动多、最近在聊什么 + 人物印象；可导出档案卡 PNG / HTML |
+| `qq_impression` | 只读人物印象：取某个群友缓存的 120~220 字小传 + 标签，给画人 / 拟口吻当素材；不调模型、不写库 |
 | `qq_links` | 链接资源库：按域名聚合、搜索、导出 |
 | `qq_topic` | 群梗考古：一个词第一次出现、谁最爱说、按月热度、语境样本 |
 | `qq_highlights` | 名场面：自动找爆聊时段，用模型写成 120~220 字回顾 |
@@ -89,6 +90,19 @@ dsh plugin install /path/to/dsh-qq-archive
 - `impression: true` 当场用 DSH 的模型生成/刷新一份，写进库；不开就只读已有缓存。
 - 昵称对不上多个人时返回 `ambiguous: true` + 候选列表，指定 QQ 号再查。
 - `format: png | html` 会把这个人导出成档案卡（需要 `chat`，按群隔离）；默认写到 `home/card-<QQ>-<群号>.png|html`。
+
+### `qq_impression`
+
+```jsonc
+{ "user": "2734909743", "chat": "group:562437955" }
+```
+
+只读某个人缓存的「人物印象」：120~220 字小传 + 3~6 个标签，外加一点人物上下文（名字、消息量、高频词、活跃时段）。
+
+- `user` 填 QQ 号，也接受昵称 / 群名片片段；同名多号会返回 `ambiguous: true` + 候选列表，指定 QQ 号再查。
+- `chat` 可选，只用来收窄「这个人是谁」（只认在该会话说过话的人）；印象本身是全档唯一一份。
+- **不会当场生成**：没有缓存时返回 `found: false`，`summary` 会明说「还没攒够印象，照实说，别编」；想攒就用 `qq_people impression=true` 或 `qq_archive action=impressions`。
+- 这个工具是给「画群友 / 按某人的性格口吻说话」当素材用的，不返回聊天原文，也不写库。
 
 ### `qq_links`
 
@@ -225,11 +239,12 @@ dsh plugin install /path/to/dsh-qq-archive
 
 ## 熟人卡：喂给 QQ 对话
 
-`qq_archive action=dashboard` 会顺手写一份 `people.json`（约 40KB）：每个会话发言最多的 24 人，配上名字、总条数、一句话人物印象、几个标签。
+每次同步成功后（手动 / 定时 / 启动同步都覆盖）都会刷新一份 `people.json`：每个会话发言最多的 60 人，配上名字、总条数、一句话人物印象、几个标签。`qq_archive action=dashboard` 也会顺手刷一次。
 
 这份文件就是给 QQ 桥接（qq-bridge）读的。桥在每次唤醒时按当前会话取前 8 个人，拼成一段「本群的熟人」放进提示词——于是 QQ 那边的大肥鱼开口就认得这些人，不用每次重新认识。
 
 - 桥那边的开关是 `config.json` 的 `socialV2.peopleCard`：`enabled`（默认 true）、`maxPeople`（默认 8）、`maxChars`（默认 1400）、`path`（默认 `~/.dsh/qq-archive/people.json`）；
+- 触发本次消息的发言人即使不在前 8 人里，也会被单独放在第一行并标 `[当前发言人]`（桥接侧实现在 `src/people-context.js`），所以「画我都不知道我是谁」不会发生；
 - 印象为空的人不会进这张卡，所以想让人被认出来，先跑 `qq_archive action=impressions`；
 - 改完 `people.json` 不用重启桥：桥按文件 mtime 缓存，下次唤醒自动重读。
 
@@ -252,7 +267,7 @@ QQ 里有人 @ 大肥鱼问「查查某某」「你觉得某某是个什么样�
 config:
   source: auto            # auto | snowluma | onebot | json
   sourcePath: ''          # 显式指定 messages.db 或 OneBot HTTP 根地址
-  home: ''                # 索引目录，默认 <DSH home>/qq-archive
+  home: ''                # 索引目录；解析顺序：显式 home > 环境变量 QQ_ARCHIVE_HOME > ~/.dsh/qq-archive
   syncIntervalMin: 10
   media:
     maxCount: 2000        # 媒体缓存上限，到顶就不再下
@@ -301,13 +316,20 @@ config:
 ## 开发
 
 ```bash
-npm test        # node:test，23 个测试文件 / 118 个用例
+npm test        # node:test，27 个测试文件 / 149 个用例
 ```
+
+测试隔离是硬契约，不靠自觉：
+
+- `npm test` 通过 `--import tests/setup-sandbox.mjs` 在每个测试进程里建一个 `$TMPDIR/qq-archive-test-*` 沙箱，`HOME` / `USERPROFILE` / `QQ_ARCHIVE_HOME` 全部指向它，跑完自动删除；任何漏传 `home` 的代码也只会写进沙箱，碰不到 `~/.dsh/qq-archive` 的真实档案；
+- `mergeConfig()` 不再静默回退：显式 `home` → `QQ_ARCHIVE_HOME` → 测试进程直接抛 `ArchiveHomeError` → 生产进程才用 `~/.dsh/qq-archive`；
+- 直接 `node --test tests/xxx.test.mjs` 单跑时没有沙箱，测试进程会拒绝隐式默认目录；每个用例仍应自己 `mkdtemp` 一个 home 并在 `finally` 里删掉；
+- `openArchive(home)` 必须收到非空目录，空值抛 `TypeError`。
 
 目录：
 
 ```text
-index.js                 工具注册（qq_find / qq_ask / qq_people / qq_links / qq_topic / qq_highlights / qq_report / qq_archive）
+index.js                 工具注册（qq_find / qq_ask / qq_people / qq_impression / qq_links / qq_topic / qq_highlights / qq_report / qq_archive）
 lib/config.mjs           配置 + SnowLuma 探测
 lib/adapters/            snowluma（只读 SQLite）| onebot | json
 lib/normalize.mjs        OneBot 事件 → 统一消息

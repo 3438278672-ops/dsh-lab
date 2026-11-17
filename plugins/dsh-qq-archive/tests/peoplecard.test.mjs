@@ -97,6 +97,12 @@ test('buildPeopleCard：系统消息名不冒充人名', () =>
     assert.equal(card.chats['group:1'].people[0].name, 'QQ u7')
   }))
 
+test('buildPeopleCard：每个会话默认带 60 人（24 个容易漏掉当前发言人）', () =>
+  withArchive(({ db }) => {
+    const card = buildPeopleCard(db)
+    assert.equal(card.perChat, 60)
+  }))
+
 test('buildPeopleCard：没人说话的会话不出现', () =>
   withArchive((archive) => {
     insertBatch(archive.db, archive, [rec('group:empty', 'u1', '甲', '只有一条', 1760000000)])

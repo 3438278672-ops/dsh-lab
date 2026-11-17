@@ -161,6 +161,9 @@ function migrate(db) {
 }
 
 export function openArchive(home) {
+  if (typeof home !== 'string' || !home.trim()) {
+    throw new TypeError(`openArchive(home)：必须显式传归档数据目录，收到 ${JSON.stringify(home)}；不允许空值回退到任何默认目录`)
+  }
   mkdirSync(home, { recursive: true })
   const path = join(home, 'archive.db')
   const db = new DatabaseSync(path)

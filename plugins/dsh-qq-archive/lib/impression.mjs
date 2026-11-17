@@ -8,7 +8,7 @@
  * 采样是等距的：只取最近 N 条会全是梗图接龙，只取早期又不像现在的人。
  */
 import { isoDate, stamp, truncate } from './util.mjs'
-import { buildProfile } from './people.mjs'
+import { buildProfile, findCandidates } from './people.mjs'
 import { listRoutes, pickRoute, generateText } from './llm.mjs'
 import { getMeta } from './db.mjs'
 
@@ -179,6 +179,145 @@ export function readImpression(db, userId) {
   if (!row || !row.impression) return null
   const { text, tags } = splitStoredImpression(row.impression, row.tags)
   return { impression: text, tags, at: row.impression_at, model: row.model || '' }
+}
+
+/**
+ * 只读的「人物印象卡」：qq_impression 工具的实现，把缓存的印象 + 一点人物上下文组好。
+ *
+ * 三条硬规矩（工具描述里也是这么承诺的）：
+ * - 绝不调模型：本函数是同步函数，只读 profiles 缓存，不会当场生成；
+ * - 绝不写库：只有 select；
+ * - 绝不把聊天原文带出去：buildProfile 读到的原文只用来算高频词和活跃时段，不进返回值。
+ *
+ * 印象是全局的（profiles.chat_key='*'）；传了 chatKey 只是把「这人是谁」的范围缩小到该会话，
+ * 不会去读会话级的另一份印象——印象本来就只有一份。
+ *
+ * @returns {{
+ *   ok: boolean,
+ *   found: boolean,
+ *   ambiguous?: boolean,
+ *   impression?: string,
+ *   tags?: string[],
+ *   at?: number,
+ *   model?: string,
+ *   person?: { userId: string, names: string[], chatKey: string|null, chatMsgs: number, topWords: string[], hours: string[] },
+ *   candidates?: Array<{ userId: string, names: string[], msgCount: number }>,
+ *   summary: string,
+ * }}
+ */
+export function readImpressionCard(db, { user, chatKey = null } = {}) {
+  const who = String(user || '').trim()
+  const chatNames = new Map()
+  for (const row of db.prepare('select chat_key, name from chats').all()) chatNames.set(row.chat_key, row.name || '')
+  const chatLabel = chatKey ? chatNames.get(chatKey) || chatKey : ''
+  const scopeText = chatKey ? `在「${chatLabel}」` : ''
+
+  const all = findCandidates(db, who)
+  // 限定会话时只考虑「在该会话说过话」的人，别把别群的同名者算进来
+  const candidates = chatKey ? all.filter((c) => (c.chats || []).some((x) => x.chatKey === chatKey)) : all
+
+  if (!candidates.length) {
+    const known = all.filter((c) => c.msgCount > 0)
+    const reason = !known.length
+      ? `归档里找不到「${who}」这个人。`
+      : chatKey
+        ? `「${who}」能对上 ${all.length} 个人，但没人在「${chatLabel}」说过话。`
+        : `「${who}」能对上 ${all.length} 个人，但都没有可用的发言记录。`
+    const hint = !known.length ? '换个昵称片段，或直接给 QQ 号再查。' : chatKey ? '换个会话，或直接给 QQ 号再查。' : '直接给 QQ 号再查。'
+    return {
+      ok: true,
+      found: false,
+      summary: `档案馆里还没攒够这个人的印象，照实说，别编。\n（${reason}${hint}）`,
+    }
+  }
+
+  if (candidates.length > 1) {
+    const list = candidates
+      .slice(0, 10)
+      .map((c) => `${c.userId}（${c.names.slice(0, 3).join(' / ') || '无名'}，${c.msgCount} 条）`)
+      .join('\n')
+    return {
+      ok: true,
+      found: false,
+      ambiguous: true,
+      summary: `「${who}」${scopeText}能对上 ${candidates.length} 个人，指定 QQ 号再查：\n${list}`,
+      candidates: candidates.map((c) => ({ userId: c.userId, names: c.names, msgCount: c.msgCount })),
+    }
+  }
+
+  const candidate = candidates[0]
+  const person = buildPersonBrief(db, chatNames, candidate, chatKey)
+
+  // 纯数字的 user 即使库里没这个人也会被当成单候选，这里单独说清楚是「查无此人」
+  if (!person.chatMsgs && !person.names.length) {
+    return {
+      ok: true,
+      found: false,
+      person,
+      summary:
+        `档案馆里还没攒够这个人的印象，照实说，别编。\n` +
+        `（归档里找不到 QQ ${candidate.userId} 这个人，还没有 TA 的任何发言；确认下 QQ 号，或换个昵称片段。）`,
+    }
+  }
+
+  const imp = readImpression(db, candidate.userId)
+  // 有别名就用“名字（QQ 号）”，没有就只写 QQ 号，别拼成“QQ 999（QQ 999）”
+  const whoLabel = person.names[0] ? `${person.names[0]}（QQ ${candidate.userId}）` : `QQ ${candidate.userId}`
+
+  if (!imp) {
+    const where = person.chatMsgs
+      ? chatKey
+        ? `TA 在「${chatLabel}」里有 ${person.chatMsgs} 条消息`
+        : `TA 在归档里有 ${person.chatMsgs} 条消息`
+      : '归档里没有 TA 的消息'
+    return {
+      ok: true,
+      found: false,
+      person,
+      summary:
+        `档案馆里还没攒够${whoLabel}的人物印象，照实说，别编。\n` +
+        `（${where}，但 profiles 里还没有缓存的小传。想攒的话可以手动跑 qq_archive action=impressions（需要先开 enhance.impression），或者等每日定时任务。）`,
+    }
+  }
+
+  const scopeNote = chatKey ? `（印象是全档的；这次只在「${chatLabel}」里看了 TA 的 ${person.chatMsgs} 条发言）` : ''
+  const when = imp.at ? stamp(imp.at * 1000) : '时间未知'
+  return {
+    ok: true,
+    found: true,
+    impression: imp.impression,
+    tags: imp.tags,
+    at: imp.at,
+    model: imp.model,
+    person,
+    summary: [
+      `档案馆里记着${whoLabel}的人物印象${scopeNote}：`,
+      imp.impression,
+      imp.tags?.length ? `标签：${imp.tags.join(' / ')}` : '',
+      `（生成于 ${when}${imp.model ? ` · ${imp.model}` : ''}；这是只读的缓存，这次没有重新生成。）`,
+      '可以当画 TA / 按 TA 的性格和口吻说话的风格素材；细节拿不准就别硬编。',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  }
+}
+
+/** 印象卡里那点人物上下文：只取词频和活跃时段，聊天原文一概不返回。 */
+function buildPersonBrief(db, chatNames, candidate, chatKey) {
+  const profile = buildProfile(db, chatNames, {
+    userId: candidate.userId,
+    chatKey,
+    // 只读工具不需要 @ 关系：那两条全表 LIKE 查询对这里没有用
+    mentions: { mentionsOut: [], mentionedBy: [] },
+  })
+  return {
+    userId: candidate.userId,
+    names: [...new Set([...candidate.names, ...profile.aliases])].slice(0, 6),
+    chatKey: chatKey || null,
+    chatMsgs: profile.total,
+    topWords: profile.topWords.slice(0, 8).map((w) => w.word),
+    hours: profile.peak.slice(0, 3).map((p) => `${p.label}（${p.pct}%）`),
+  }
 }
 
 export async function generateImpression({ db, chatNames, userId, chatKey = null, llm, route, sample = 60, signal, onProgress }) {

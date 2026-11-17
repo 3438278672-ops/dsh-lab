@@ -21,6 +21,7 @@
   "files": [
     "index.js",
     "lib",
+    "tools",
     "scripts",
     "cordis.patch.yml",
     "README.md"
@@ -36,7 +37,7 @@
   },
   "license": "MIT",
   "scripts": {
-    "test": "node --test \"tests/*.test.mjs\""
+    "test": "node --import ./tests/setup-sandbox.mjs --test \"tests/*.test.mjs\""
   },
   "engines": {
     "node": ">=22.5"

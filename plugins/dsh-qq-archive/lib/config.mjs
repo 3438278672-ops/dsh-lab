@@ -64,6 +64,44 @@ export const DEFAULTS = {
   },
 }
 
+/** 数据目录无法安全解析时抛这个错，调用方（插件入口 / 测试）应当直接暴露给用户。 */
+export class ArchiveHomeError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ArchiveHomeError'
+    this.code = 'ARCHIVE_HOME_UNAVAILABLE'
+  }
+}
+
+/**
+ * 当前进程是不是 node:test 跑起来的（runner 进程或它派生的测试子进程）。
+ * 测试进程绝不能继承「用户真实数据目录」这种环境默认值。
+ */
+export function isTestProcess(env = process.env, execArgv = process.execArgv) {
+  if (env.NODE_TEST_CONTEXT) return true
+  return execArgv.some((arg) => arg === '--test' || arg.startsWith('--test-'))
+}
+
+/**
+ * 数据目录的唯一解析入口。
+ *
+ * 顺序：显式 home → QQ_ARCHIVE_HOME → 测试进程拒绝猜测 → 生产默认 ~/.dsh/qq-archive。
+ * 「默认目录」只在生产进程里成立：测试进程必须显式声明数据目录（传 home 或设
+ * QQ_ARCHIVE_HOME），否则宁可失败也不碰用户真实档案。
+ */
+export function resolveHome({ home = '', env = process.env, testProcess, fallback = defaultHome } = {}) {
+  const explicit = typeof home === 'string' ? home.trim() : home ? String(home) : ''
+  if (explicit) return explicit
+  const fromEnv = String(env.QQ_ARCHIVE_HOME ?? '').trim()
+  if (fromEnv) return fromEnv
+  if (testProcess ?? isTestProcess(env)) {
+    throw new ArchiveHomeError(
+      `测试进程里不能使用默认数据目录（${fallback()}）：请显式传 home，或设置 QQ_ARCHIVE_HOME 指向临时目录。`,
+    )
+  }
+  return fallback()
+}
+
 export function mergeConfig(config) {
   const raw = config && typeof config === 'object' ? config : {}
   const out = { ...DEFAULTS }
@@ -88,7 +126,8 @@ export function mergeConfig(config) {
       out[key] = typeof fallback === 'number' ? Number(value) : value
     }
   }
-  if (!out.home) out.home = defaultHome()
+  // home 不允许静默回退：统一交给 resolveHome；测试进程里没显式目录会直接抛错。
+  out.home = resolveHome({ home: typeof out.home === 'string' ? out.home : '' })
   return out
 }
 

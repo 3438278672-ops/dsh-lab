@@ -15,7 +15,8 @@ import { splitStoredImpression } from './impression.mjs'
 import { join } from 'node:path'
 
 export const PEOPLE_FILE = 'people.json'
-const DEFAULT_PER_CHAT = 24
+// 每个会话最多带 60 个人：群大、活跃的人多，24 个容易漏掉当前发言人，桥接就认不出正在说话的人
+const DEFAULT_PER_CHAT = 60
 const DEFAULT_MIN_MSGS = 3
 const IMPRESSION_CHARS = 180
 
