@@ -6,7 +6,7 @@ Host-only DeepSeek Harness bundle that drives a phone over `adb`. Eight `phone_*
 
 ```powershell
 # install (already done for the desktop profile)
-#   plugin_manager action=install_bundle target="D:/path/to/dsh-adb-phone"
+#   plugin_manager action=install_bundle target="D:\新建文件夹\DSK\adb-phone"
 
 # the profile links this directory, so edits are picked up only after a reload:
 #   plugin_manager action=set_plugin target=include:adb-phone enabled=false
@@ -65,7 +65,7 @@ IME 没装时工具会直接报错并给出上面的安装命令，不会静默�
 
 - `adb exec-out` merges the device's stderr into stdout, so `screencap -p` can arrive prefixed with `[Warning] Multiple displays were found…`. `extractPng` slices from the PNG signature to the `IEND` chunk.
 - This phone has a rear/sub display; `dumpsys window` lists both, so the focused window is taken from the **last** `mCurrentFocus=Window{…}` match (the active display), not the first.
-- `adb pull` refuses non-ASCII destination paths (`D:\含中文的目录\…`); the plugin never pulls — it reads `exec-out` bytes and writes them itself.
+- `adb pull` refuses non-ASCII destination paths (`D:\新建文件夹\…`); the plugin never pulls — it reads `exec-out` bytes and writes them itself.
 - **A sleeping phone eats input silently.** `input tap` goes nowhere and `screencap` replays a stale frame, no error on either side. Every interacting tool now asks `dumpsys power` for `mWakefulness` first and presses `KEYCODE_WAKEUP` (224) when it is not `Awake`; `phone_screen` reports `screen=<state>` and says `(woke it)` when it intervened.
 - `uiautomator dump` fails with `could not get idle state` while the window animates (common right after a tap), so `dumpUi` retries up to 3× with 400 ms backoff.
 - Screenshots land in `%TEMP%\dsh-phone\` at ~1.5 MB each; only the newest 20 are kept.
@@ -111,7 +111,7 @@ to reach the owner is a picture with the question drawn on it:
 ```powershell
 # 1. phone_screen already left a fresh PNG in %TEMP%\dsh-phone\
 python make-ping.py "密码框挡住了，帮我输一下"     # -> ping.png, 720 wide, caption band on top
-# 2. qqimage MCP:  key=private:100000002, path=<abs path>\ping.png
+# 2. qqimage MCP:  key=private:2220222310, path=<abs path>\ping.png
 ```
 
 Verified 2026-10-26 (`messageId` came back from the bridge).

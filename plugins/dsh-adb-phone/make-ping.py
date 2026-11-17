@@ -10,7 +10,7 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ping.png")
+OUT = r"D:\新建文件夹\DSK\adb-phone\ping.png"
 FONT = r"C:\Windows\Fonts\msyh.ttc"
 CAPTION = sys.argv[1] if len(sys.argv) > 1 else "手机那边需要你一下"
 WIDTH = 720

@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const p = promisify(execFile)
-const ADB = process.env.ADB || 'adb'
+const ADB = 'C:\\Users\\Administrator\\AppData\\Local\\Android\\platform-tools\\adb.exe'
 const S = '699dd23e'
 
 async function run(label, args, encoding = 'utf8') {
