@@ -6,6 +6,8 @@
 
 > 2026 年 9–11 月，围绕「让智能体真的能干活」做的一批东西。
 
+改动记录见 [CHANGELOG.md](CHANGELOG.md)：按日期归并，最新在上，从建库（2026-11-07）写到上一次提交。
+
 ---
 
 ## 一览
@@ -23,7 +25,7 @@
 | [mcp/pixiv-duty](mcp/pixiv-duty) | Pixiv App API 的 MCP：搜索 / 详情 / 下载 / 小说分段 / 校验 | pixivpy、FastMCP |
 | [mcp/bili-duty](mcp/bili-duty) | B 站 MCP 的加固分支：30 个工具，登录 / 搜索 / 评论 / 字幕 / 私信 / 投稿 | bilibili-api-python |
 
-十个项目、39 个测试文件。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
+十个项目、51 个测试文件（44 个 `*.test.mjs` + 2 个 python 测试 + 5 个测试辅助脚本）。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
 
 ---
 
@@ -183,6 +185,7 @@ python -m venv .venv
 
 ```
 dsh-lab/
+├─ CHANGELOG.md           # 更新说明（按日期，最新在上）
 ├─ plugins/
 │  ├─ dsh-qq-sing/        # 点歌翻唱（index/worker/queue/cooldown + python 管线 + 8 个测试）
 │  ├─ dsh-coser-fish/     # 以图找人（引擎内核 + 插件层 + 上游 CLI）
