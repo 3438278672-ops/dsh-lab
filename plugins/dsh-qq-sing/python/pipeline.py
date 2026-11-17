@@ -31,8 +31,9 @@ RVC = r"D:\GSV\rvc\RVC"
 RVC_PY = r"D:\GSV\rvc\venv\Scripts\python.exe"
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
-MODEL = "assets/weights/dfy2_sing_v3.pth"
-INDEX = "assets/indices/dfy2_sing_v3_added_IVF2671_Flat_nprobe_1_dfy2_sing_v3_v2.index"
+MODEL = "assets/weights/s3125_sing_v1.pth"
+INDEX = "assets/indices/s3125_sing_v1_added_IVF2832_Flat_nprobe_1_s3125_sing_v1_v2.index"
+MODEL_NAME = os.path.splitext(os.path.basename(MODEL))[0]
 KEY_ADJUST = r"D:\GSV\rvc\key_adjust.py"
 KEYFIT = r"D:\GSV\rvc\keyfit.py"
 SECTIONS = r"D:\GSV\rvc\sections.py"
@@ -57,6 +58,8 @@ FEIYU_PY = r"D:\GSV\feiyu\venv\Scripts\python.exe"
 LESSONS = r"D:\GSV\rvc\LESSONS.md"
 # 伴奏清洁脚本：以前这里少定义，名字错了一直被 except 吞掉、清洁从未生效
 CLEAN_CHECK = os.environ.get("CLEAN_CHECK", r"D:\GSV\rvc\clean_check.py")
+# 开头话痨检测（插件自带脚本，用 GSV_PY 的 pyworld/librosa 跑）
+INTRO_TRIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intro_trim.py")
 
 # 歌名/标题里出现这些词，就按对应风格踩点加怪叫（ADLIB=dj|funny|party 强制，ADLIB=0 关闭）
 DJ_WORDS = ("dj", "电音", "舞曲", "remix", "蹦迪", "慢摇", "夜店", "土嗨")
@@ -169,7 +172,29 @@ def detect_silences(path, noise="-32dB", dur=0.4):
     return silences, txt
 
 
-def plan_boundaries(total, silences, chunk=48.0, max_seg=56.0, min_seg=12.0, secs=None):
+def detect_intro_trim(workdir, vocal, ins):
+    """开头是主持人说话、音乐后进来 → 返回该跳过多少秒（0 = 不裁）。"""
+    if not (INTRO_TRIM and os.path.exists(INTRO_TRIM)):
+        return 0.0
+    try:
+        proc = subprocess.run(
+            [GSV_PY, INTRO_TRIM, "--vocal", vocal, "--instrument", ins],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+        )
+        lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
+        if not lines:
+            log("intro_trim 没有输出：%s" % proc.stderr[-300:])
+            return 0.0
+        info = json.loads(lines[-1])
+        trim = float(info.get("trim") or 0.0)
+        log("intro_trim: %s" % (info.get("reason") or ""))
+        return max(0.0, min(trim, 120.0))
+    except Exception as exc:
+        log("intro_trim failed, keep 0: %s" % exc)
+        return 0.0
+
+
+def plan_boundaries(total, silences, chunk=48.0, max_seg=56.0, min_seg=12.0, secs=None, lead_trim=0.0):
     """在静音中点附近切，保证每段 <= max_seg，段尾不要过短。
 
     没有合规静音时优先退到主歌/副歌边界（sections），最后才硬切——
@@ -185,6 +210,9 @@ def plan_boundaries(total, silences, chunk=48.0, max_seg=56.0, min_seg=12.0, sec
         tail_gap = total - silences[-1][0]
         if tail_gap > 18:
             end = min(total, silences[-1][0] + 5.0)
+    # 开场话痨：伴奏还没进、人声在说话 → 直接从音乐进入处起唱
+    if lead_trim and lead_trim > start:
+        start = min(float(lead_trim), total - min_seg)
     if end - start < min_seg:
         start, end = 0.0, total
 
@@ -538,7 +566,7 @@ def append_lesson(work, src, title, pitch, med, klass, style, adlib_count, nseg,
         rec = (
             "\n## %s · %s\n"
             "- 输入：`%s`，人声中位 %.1fHz（%s），变调 %+d → %.1fHz\n"
-            "- 参数：dfy2_sing_v3，index-rate 0.75，rmvpe，%ss 分块 %d 段，"
+            "- 参数：%s，index-rate 0.75，rmvpe，%ss 分块 %d 段，"
             "混音 人声1.15/伴奏0.9/limit0.89\n"
             "- 味道：%s（%d 处怪叫）\n"
             "- 电平：峰值 %+.1f dB，平均 %+.1f dB；成片 %s（%.0fs）\n"
@@ -546,6 +574,7 @@ def append_lesson(work, src, title, pitch, med, klass, style, adlib_count, nseg,
         ) % (
             stamp, (title or os.path.basename(work))[:40],
             src, med, klass, pitch, med * 2 ** (pitch / 12.0) if med else 0.0,
+            MODEL_NAME,
             int(CHUNK), nseg,
             (style or "没有怪叫"), adlib_count,
             peak, mean, movie, mix_dur,
@@ -641,10 +670,14 @@ def main():
         log("instrument transposed %+d semitones" % pitch)
 
     stage("plan")
+    # 开场白话痨：先看要不要跳过「主持人说话、音乐还没进来」的那一段
+    lead_trim = detect_intro_trim(work, vocal, ins)
     silences, _ = detect_silences(vocal)
     # 段落边界只算一次：切点要用，RVC 参数分组也要用（原来只在 convert 里算，切点完全没用上）
     secs = detect_sections(work, vocal)
-    segments = plan_boundaries(voc_dur or total, silences, args.chunk, args.max_seg, secs=secs)
+    segments = plan_boundaries(voc_dur or total, silences, args.chunk, args.max_seg, secs=secs, lead_trim=lead_trim)
+    if lead_trim:
+        log("开场裁掉 %.2fs（从 %.2fs 起唱）" % (segments[0][0], segments[0][0]))
     log("SEGMENTS=%d" % len(segments))
 
     plan = convert(work, vocal, segments, pitch, secs)
@@ -702,6 +735,7 @@ def main():
         "style": style or "",
         "adlibs": adlib_count,
         "movie": mix_m4a,
+        "introTrim": round(segments[0][0], 2),
     }
     with open(os.path.join(work, "manifest.json"), "w", encoding="utf8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)

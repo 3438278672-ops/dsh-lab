@@ -437,21 +437,23 @@ async function main() {
   // ── 1. 找歌 + 下载 ──────────────────────────────────────────────
   const audioDir = join(job.jobDir, 'audio')
   await mkdir(audioDir, { recursive: true })
-  const fetchResult = await runProcess(
-    job.pythonBili,
-    [
-      job.fetchScript,
-      '--song',
-      job.song,
-      '--workdir',
-      audioDir,
-      '--credential',
-      job.credentialFile,
-      '--max-minutes',
-      String(job.maxSongMinutes),
-    ],
-    { timeoutMs: 10 * 60 * 1000 },
-  )
+  const fetchArgs = [
+    '--workdir',
+    audioDir,
+    '--credential',
+    job.credentialFile,
+    '--max-minutes',
+    String(job.maxSongMinutes),
+  ]
+  if (job.bvid && /^BV[0-9A-Za-z]{10}$/.test(String(job.bvid))) {
+    // 确认阶段已经选定 BV：不要再搜一遍，直接下这个（不然会重新挑源）
+    fetchArgs.unshift('--bvid', String(job.bvid))
+  } else {
+    fetchArgs.unshift('--song', job.song)
+  }
+  const fetchResult = await runProcess(job.pythonBili, [job.fetchScript, ...fetchArgs], {
+    timeoutMs: 10 * 60 * 1000,
+  })
   const fetched = lastJsonLine(fetchResult.out, 'RESULT=')
   if (!fetched?.ok) {
     const detail = lastErrorLine(fetchResult.out) || fetchResult.err.slice(-600)

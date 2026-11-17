@@ -56,13 +56,13 @@ assert.equal((await readFile(path.join(home, 'state.json'), 'utf8').catch(() => 
 ok('blocked -> no spawn')
 
 // 2. 私聊不传 requester → 用对方 QQ 号记账并起唱
-const started = await sing.execute({ song: '稻香', target: 'private:100000002' })
+const started = await sing.execute({ song: '稻香', target: 'private:2220222310' })
 assert.equal(started.ok, true)
 assert.equal(started.started, true)
 const cd1 = JSON.parse(await readFile(path.join(home, 'cooldown.json'), 'utf8'))
-assert.equal(cd1['100000002'].song, '稻香')
+assert.equal(cd1['2220222310'].song, '稻香')
 const job = JSON.parse(await readFile(path.join(home, 'jobs', started.jobId, 'job.json'), 'utf8'))
-assert.equal(job.requester, '100000002')
+assert.equal(job.requester, '2220222310')
 ok('private auto-requester + marked')
 
 // 3. 群里不传 requester → 明确报错，不起唱
@@ -80,11 +80,11 @@ const deadline = Date.now() + 20_000
 let refunded = false
 while (Date.now() < deadline) {
   const cd = JSON.parse(await readFile(path.join(home, 'cooldown.json'), 'utf8'))
-  if (!cd['100000002']) { refunded = true; break }
+  if (!cd['2220222310']) { refunded = true; break }
   await new Promise((r) => setTimeout(r, 300))
 }
 assert.equal(refunded, true, 'cooldown not refunded after failed fetch')
-const again = await sing.execute({ song: '稻香', requester: '100000002', target: 'private:100000002' })
+const again = await sing.execute({ song: '稻香', requester: '2220222310', target: 'private:2220222310' })
 assert.equal(again.ok, true)
 assert.equal(again.started, true)
 ok('refund on failure -> can re-request')
@@ -107,7 +107,7 @@ await waitIdle()
 
 // 5. 白名单：不计时，连点两次都放行
 await writeFile(path.join(home, 'allowlist.txt'), '# 测试\n555555\n', 'utf8')
-const w1 = await sing.execute({ song: '稻香', requester: '555555', target: 'private:100000002' })
+const w1 = await sing.execute({ song: '稻香', requester: '555555', target: 'private:2220222310' })
 assert.equal(w1.ok, true)
 assert.equal(w1.whitelisted, true)
 const cdw = JSON.parse(await readFile(path.join(home, 'cooldown.json'), 'utf8'))
@@ -122,7 +122,7 @@ try {
 await new Promise((r) => setTimeout(r, 500))
 await rm(path.join(home, 'state.json'), { force: true })
 await rm(path.join(home, 'busy.lock'), { force: true })
-const w2 = await sing.execute({ song: '稻香', requester: '555555', target: 'private:100000002' })
+const w2 = await sing.execute({ song: '稻香', requester: '555555', target: 'private:2220222310' })
 assert.equal(w2.ok, true)
 assert.equal(w2.whitelisted, true)
 ok('whitelist -> no cooldown, can point repeatedly')

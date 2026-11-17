@@ -21,7 +21,7 @@ const ok = (name) => { passed += 1; console.log('PASS', name) }
 
 // 1. 解析
 assert.equal(parseRequester('123456789'), '123456789')
-assert.equal(parseRequester(' 100000002 '), '100000002')
+assert.equal(parseRequester(' 2220222310 '), '2220222310')
 assert.equal(parseRequester('1234'), null)
 assert.equal(parseRequester('12a45'), null)
 assert.equal(parseRequester(''), null)
@@ -78,11 +78,11 @@ const home2 = await mkdtemp(path.join(os.tmpdir(), 'qqsing-allow-'))
 assert.equal((await readAllowlist(home2)).size, 0)
 await writeFile(
   path.join(home2, 'allowlist.txt'),
-  '# 注释行\n123456789 # 小明\n 100000002,333333\nnot-a-uid\n444444；555555\n',
+  '# 注释行\n123456789 # 小明\n 2220222310,333333\nnot-a-uid\n444444；555555\n',
   'utf8',
 )
 const allow = [...(await readAllowlist(home2))].sort()
-assert.deepEqual(allow, ['123456789', '100000002', '333333', '444444', '555555'].sort())
+assert.deepEqual(allow, ['123456789', '2220222310', '333333', '444444', '555555'].sort())
 ok('allowlist')
 
 console.log(`\n${passed} checks passed`)

@@ -81,7 +81,7 @@ apply(ctx, {
 const sing = tools.get('qq_sing')
 assert.ok(sing, 'qq_sing not registered')
 
-const q1 = await sing.execute({ song: '稻香', requester: '333333', target: 'private:100000002' })
+const q1 = await sing.execute({ song: '稻香', requester: '333333', target: 'private:2220222310' })
 assert.equal(q1.ok, true)
 assert.equal(q1.queued, true)
 assert.equal(q1.position, 1)

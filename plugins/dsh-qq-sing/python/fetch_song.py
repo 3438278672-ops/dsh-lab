@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""点歌取源：B 站搜索 → 挑一条最像“原曲”的 → 下载音频轨。
+"""点歌取源：理解歌名 → B 站多路搜索 → 排序 + 判置信度 → 下载音频轨。
+
+两种模式：
+  --plan            只搜不下载，输出 `PLAN=<json>`（候选 + 置信度），给确认流程用
+  --bvid BVxxxx     已知 BV 号，跳过搜索直接下载（确认后走这条路）
+
+默认（既不 --plan 也不 --bvid）保留老行为：搜索 + 直接下最高分，供旧队列兜底。
 
 只依赖 bilibili_api + httpx（跑在 bili-duty 的 venv 里）。
-成功时 stdout 打印一行 `RESULT=<json>`；失败时打印 `ERROR=<message>` 并以非 0 退出。
+成功时 stdout 打印一行 `RESULT=<json>` 或 `PLAN=<json>`；失败打印 `ERROR=` 并非 0 退出。
 """
 import argparse
 import asyncio
 import json
-import math
-import os
 import re
 import sys
 import traceback
@@ -17,73 +21,29 @@ from pathlib import Path
 
 import httpx
 
-from bilibili_api import Credential, search, video
+from bilibili_api import Credential, search, user, video
 from bilibili_api.search import OrderVideo, SearchObjectType
+
+import songsearch
+
+# 被 Node 以管道拉起时，Windows 的 stdout 默认走 cp936；PLAN/RESULT 里有中文标题，
+# 不强制 UTF-8 就会在日志/确认文案里变成乱码。和 pipeline.py 保持同一约定。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-# 明显不是“能唱的歌”的标题
-BAD_TITLE = re.compile(
-    r"伴奏|纯音乐|消音|卡拉ok|karaoke|instrumental|钢琴版|吉他版|教学|教程|"
-    r"直播回放|合集|串烧|remix|dj版|慢速|0\.8倍|降调|升调|1小时|一小时|循环|"
-    r"白噪音|asmr|解析|乐评|reaction|翻弹|二胡|古筝版|小提琴版|八音盒",
-    re.I,
-)
-HARD_LIMIT_SEC = 8 * 60
-MIN_SEC = 70
-
 
 def strip_html(s: str) -> str:
-    return re.sub(r"<[^>]+>", "", s or "").replace("&amp;", "&").strip()
+    return songsearch.strip_html(s)
 
 
 def parse_dur(v) -> int:
-    try:
-        if isinstance(v, int):
-            return v
-        parts = [int(float(x)) for x in str(v).strip().split(":")]
-        sec = 0
-        for p in parts:
-            sec = sec * 60 + p
-        return sec
-    except Exception:
-        return 0
-
-
-def tokens(keyword: str):
-    parts = re.split(r"[\s《》「」【】（）()、,，.。!！?？\-—_/\\|]+", keyword)
-    return [p for p in parts if len(p) >= 2]
-
-
-def name_hit(title: str, keyword: str) -> bool:
-    toks = tokens(keyword)
-    if not toks:
-        return False
-    return all(t in title for t in toks)
-
-
-def clean_keyword(raw: str) -> str:
-    s = raw.strip()
-    s = re.sub(r"^(请|帮我|给我|麻烦)?(唱一首|唱个|唱一下|唱|来一首|来首|点一首|点首|点歌|整个|搞一个|放一首)\s*", "", s)
-    s = re.sub(r"[吧呀呗嘛啊哦呀~～]+$", "", s)
-    s = s.strip(" \t\r\n《》「」【】\"'“”‘’")
-    return s or raw.strip()
-
-
-def score_item(item, keyword, rank):
-    title = strip_html(item.get("title", ""))
-    play = int(item.get("play") or 0)
-    s = -0.55 * rank + 1.15 * math.log10(play + 10)
-    if name_hit(title, keyword):
-        s += 2.5
-    if re.search(r"翻唱|cover|改编", title, re.I):
-        s -= 1.5
-    if len(title) > 80:
-        s -= 0.5
-    return s, title
+    return songsearch.parse_dur(v)
 
 
 async def bili_search(cred, keyword, order):
@@ -96,44 +56,252 @@ async def bili_search(cred, keyword, order):
             credential=cred,
         )
     except TypeError:
+        # 老版本 bilibili_api 的 search_by_type 不接受 credential
         res = await search.search_by_type(
             keyword, search_type=SearchObjectType.VIDEO, order_type=order, page=1
         )
     return res or {}
 
 
-async def pick_song(cred, keyword, hard_limit):
-    attempts = [keyword, None, None]
-    # 去掉“某某的”这种歌手修饰，退一步再搜
-    m = re.match(r"^(.+?)的(.+)$", keyword)
-    if m:
-        attempts[1] = m.group(2)
-        attempts[2] = m.group(1) + " " + m.group(2)
-    orders = [OrderVideo.TOTALRANK, OrderVideo.CLICK, OrderVideo.TOTALRANK]
+async def collect(cred, parsed, skip=()):
+    """按 parse 出来的查询逐个搜，合并去重。返回 (items, queries_tried, errors)。
 
-    seen = set()
-    for query, order in zip([q for q in attempts if q], orders):
-        res = await bili_search(cred, query, order)
-        items = res.get("result") or []
-        ranked = []
-        for rank, item in enumerate(items):
-            if item.get("type") and item.get("type") != "video":
+    6 条查询每条一次搜索，总共几秒；宁可多搜几路，也不要只搜原话就下结论。
+    skip 里的查询已经搜过（比如推断出歌手后补搜时不必重搜原话）。
+    """
+    queries = [q for q in songsearch.build_queries(parsed) if q not in set(skip)]
+    items: list[dict] = []
+    seen: dict[str, int] = {}
+    errors: list[str] = []
+    tried: list[str] = []
+
+    def absorb(res, query):
+        for rank, item in enumerate(res.get("result") or []):
+            bvid = str(item.get("bvid") or "")
+            if not bvid:
                 continue
-            dur = parse_dur(item.get("duration"))
-            title = strip_html(item.get("title", ""))
-            if not dur or dur < MIN_SEC or dur > hard_limit:
+            if bvid in seen:
+                if rank < seen[bvid]:
+                    seen[bvid] = rank
+                    for old in items:
+                        if old.get("bvid") == bvid:
+                            old["_rank"] = rank
                 continue
-            if BAD_TITLE.search(title):
+            seen[bvid] = rank
+            item = dict(item)
+            item["_rank"] = rank
+            item["_query"] = query
+            items.append(item)
+
+    for query in queries:
+        tried.append(query)
+        try:
+            absorb(await bili_search(cred, query, OrderVideo.TOTALRANK), query)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{query}: {exc}")
+
+    # 综合排序一条都没搜出来（或者全被过滤）时，最后用播放量排序兜底一次
+    if len(items) < 3 and parsed.raw:
+        try:
+            res = await bili_search(cred, parsed.raw, OrderVideo.CLICK)
+            tried.append(parsed.raw + "（按播放）")
+            absorb(res, parsed.raw)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{parsed.raw}（按播放）: {exc}")
+
+    return items, tried, errors
+
+
+async def _channel_get_videos(u, keyword, pn):
+    """频道内搜索；Wbi 偶发限流，重试一次再放弃。"""
+    last = None
+    for attempt in range(2):
+        try:
+            return await u.get_videos(
+                keyword=keyword, ps=30, pn=pn, order=user.VideoOrder.PUBDATE
+            )
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt == 0:
+                await asyncio.sleep(0.8)
+    raise last
+
+
+def _channel_item(item, channel_name):
+    return {
+        "bvid": str(item.get("bvid") or ""),
+        "title": item.get("title") or "",
+        "author": channel_name,
+        "duration": item.get("length") or item.get("duration") or 0,
+        "play": item.get("play") or 0,
+        "pubdate": item.get("created") or 0,
+        "type": "video",
+    }
+
+
+async def search_channels(cred, parsed, hard_limit):
+    """先搜 jayfm，没有再搜 LeoFM；两个频道都没有就返回空结论。
+
+    返回 {ranked, queries, errors, total, channel}。
+    """
+    queries: list[str] = []
+    errors: list[str] = []
+    total = 0
+    keywords = songsearch.channel_keywords(parsed)
+    for channel in songsearch.CHANNELS:
+        u = user.User(uid=channel["mid"], credential=cred)
+        for keyword in keywords:
+            queries.append(f"{channel['name']}:{keyword}")
+            try:
+                first = await _channel_get_videos(u, keyword, 1)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{channel['name']}「{keyword}」: {exc}")
                 continue
-            bvid = item.get("bvid")
-            if not bvid or bvid in seen:
+            vlist = list(((first or {}).get("list") or {}).get("vlist") or [])
+            page = (first or {}).get("page") or {}
+            count = int(page.get("count") or 0)
+            pages = min(2, max(1, (count + 29) // 30))
+            for pn in range(2, pages + 1):
+                try:
+                    more = await _channel_get_videos(u, keyword, pn)
+                    vlist += list(((more or {}).get("list") or {}).get("vlist") or [])
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{channel['name']}「{keyword}」第{pn}页: {exc}")
+                    break
+                await asyncio.sleep(0.2)
+            if not vlist:
                 continue
-            seen.add(bvid)
-            s, _ = score_item(item, keyword, rank)
-            ranked.append((s, item))
-        if ranked:
-            ranked.sort(key=lambda x: x[0], reverse=True)
-            return ranked[0][1]
+            items = [_channel_item(item, channel["name"]) for item in vlist]
+            total += len(items)
+            ranked = songsearch.rank_channel_candidates(
+                parsed, items, channel["key"], channel["name"], hard_limit=hard_limit
+            )
+            if ranked["candidates"]:
+                return {
+                    "ranked": ranked,
+                    "queries": queries,
+                    "errors": errors,
+                    "total": total,
+                    "channel": channel,
+                }
+        # 这个频道没有这首歌，继续看下一个
+    return {
+        "ranked": {"confidence": "low", "pick": None, "candidates": [], "reason": ""},
+        "queries": queries,
+        "errors": errors,
+        "total": total,
+        "channel": None,
+    }
+
+
+async def resolve_source(cred, parsed, hard_limit):
+    """指定频道优先；两个频道都没有才回退普通搜索。
+
+    返回 (parsed, ranked, tried, errors, artist, total, channel)。
+    """
+    if parsed.bvid:
+        return parsed, {"confidence": "low", "pick": None, "candidates": [], "reason": ""}, [], [], "", 0, None
+
+    channel = await search_channels(cred, parsed, hard_limit)
+    if channel["ranked"]["candidates"]:
+        return (
+            parsed,
+            channel["ranked"],
+            channel["queries"],
+            channel["errors"],
+            "",
+            channel["total"],
+            channel["channel"],
+        )
+
+    parsed, ranked, items, tried, errors, artist = await search_ranked(
+        cred, parsed, hard_limit
+    )
+    return (
+        parsed,
+        ranked,
+        channel["queries"] + tried,
+        channel["errors"] + errors,
+        artist,
+        len(items),
+        None,
+    )
+
+
+def explain(parsed, ranked):
+    """给模型看的短说明：为什么高置信/为什么不敢直接唱。"""
+    pick = ranked.get("pick")
+    if pick:
+        bits = [b for b in pick.get("reasons", []) if not b.startswith("降权")]
+        return "；".join(bits[:4]) or "命中"
+    return ranked.get("reason") or "不确定"
+
+
+async def search_ranked(cred, parsed, hard_limit):
+    """搜 + 排序；没给歌手时先反推原唱、补一轮查询再定稿。
+
+    返回 (实际采用的 parsed, ranked, items, tried, errors, 推断出的歌手)。
+    推断的歌手只有在「确实把带歌手命中的结果顶到第一」时才采用，否则回退，
+    避免瞎猜一个名字反而把正确结果压下去。
+    """
+    items, tried, errors = await collect(cred, parsed)
+    artist = ""
+    ranked = songsearch.rank_candidates(parsed, items, hard_limit=hard_limit)
+    if not parsed.artist and parsed.title:
+        artist, song = songsearch.infer_artist(parsed, items)
+        if artist:
+            hinted = songsearch.with_artist(parsed, artist, song)
+            more, more_tried, more_errors = await collect(cred, hinted, skip=set(tried))
+            if more:
+                items = items + more
+                tried = tried + more_tried
+                errors = errors + more_errors
+            hinted_ranked = songsearch.rank_candidates(hinted, items, hard_limit=hard_limit)
+            pick = hinted_ranked.get("pick")
+            if hinted_ranked["confidence"] == "high" and pick and "歌手命中" in pick["reasons"]:
+                return hinted, hinted_ranked, items, tried, errors, artist
+            # 推断没把结果顶上去：回退到不带歌手的排序
+            artist = ""
+            ranked = songsearch.rank_candidates(parsed, items, hard_limit=hard_limit)
+    return parsed, ranked, items, tried, errors, artist
+
+
+async def plan(cred, args, hard_limit):
+    raw = args.song.strip()
+    if not raw:
+        raise RuntimeError("没说要唱哪首")
+    parsed = songsearch.parse_query(raw)
+    if not parsed.title and not parsed.bvid:
+        raise RuntimeError("歌名没看懂，换个说法或者直接贴 BV 号")
+
+    parsed, ranked, tried, errors, artist, total, channel = await resolve_source(
+        cred, parsed, hard_limit
+    )
+    if not channel:
+        # 用户要求：两位频道都没有这首歌时，回退搜索也要先问一句，不能直接唱
+        base = ranked.get("reason") or ""
+        ranked = dict(ranked)
+        ranked["confidence"] = "low"
+        ranked["pick"] = None
+        ranked["reason"] = "两位频道都没有这首歌，按普通搜索结果先确认" + (
+            f"（{base}）" if base else ""
+        )
+    result = {
+        "ok": True,
+        "keyword": raw,
+        "parsed": parsed.as_dict(),
+        "artistInferred": bool(artist),
+        "queries": tried,
+        "confidence": ranked["confidence"],
+        "reason": ranked.get("reason") or "",
+        "why": explain(parsed, ranked),
+        "pick": ranked.get("pick"),
+        "candidates": ranked.get("candidates") or [],
+        "total": total,
+        "errors": errors[:3],
+        "channel": channel["name"] if channel else "",
+    }
+    print("PLAN=" + json.dumps(result, ensure_ascii=False), flush=True)
     return None
 
 
@@ -231,7 +399,7 @@ def cookies_from(cred) -> str:
 
 async def run(args):
     raw = args.song.strip()
-    if not raw:
+    if not raw and not args.bvid:
         raise RuntimeError("没说要唱哪首")
 
     creds = load_credential(args.credential)
@@ -243,28 +411,59 @@ async def run(args):
     )
     hard_limit = max(90, int(float(args.max_minutes or 9) * 60))
 
-    workdir = Path(args.workdir)
-    workdir.mkdir(parents=True, exist_ok=True)
+    # 只搜不下的确认阶段
+    if args.plan:
+        return await plan(cred, args, hard_limit)
 
-    bvid = None
-    direct = False
-    m = re.search(r"(BV[0-9A-Za-z]{10})", raw)
-    if m:
-        bvid = m.group(1)
-        keyword = bvid
-        direct = True
-    else:
-        keyword = clean_keyword(raw)
+    # 已知 BV（确认流程 / 直接贴 BV）跳过搜索
+    bvid = (args.bvid or "").strip()
+    if not bvid:
+        m = re.search(r"(BV[0-9A-Za-z]{10})", raw)
+        if m:
+            bvid = m.group(1)
+    direct = bool(bvid)
 
+    parsed = songsearch.parse_query(raw or bvid)
+    keyword = parsed.title or bvid or raw
     title = ""
     duration = 0
+    picked_note = "BV 直连"
+
     if not bvid:
-        picked = await pick_song(cred, keyword, hard_limit)
-        if not picked:
-            raise RuntimeError(f"B站没搜到合适的《{keyword}》")
-        bvid = picked["bvid"]
-        title = strip_html(picked.get("title", ""))
-        duration = parse_dur(picked.get("duration"))
+        parsed, ranked, tried, errors, artist, total, channel = await resolve_source(
+            cred, parsed, hard_limit
+        )
+        keyword = parsed.title or keyword
+        pick = ranked.get("pick") or (ranked.get("candidates") or [None])[0]
+        if not pick:
+            detail = errors[0] if errors else ""
+            raise RuntimeError(f"B站没搜到合适的《{keyword}》{('（' + detail + '）') if detail else ''}")
+        bvid = pick["bvid"]
+        title = pick.get("title", "")
+        duration = int(pick.get("duration") or 0)
+        picked_note = rank_note(ranked, pick)
+        print(
+            "PLAN=" + json.dumps(
+                {
+                    "ok": True,
+                    "keyword": raw,
+                    "parsed": parsed.as_dict(),
+                    "artistInferred": bool(artist),
+                    "confidence": ranked["confidence"],
+                    "reason": ranked.get("reason") or "",
+                    "pick": pick,
+                    "candidates": ranked.get("candidates") or [],
+                    "queries": tried,
+                    "channel": channel["name"] if channel else "",
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        if ranked["confidence"] != "high":
+            # 旧队列没有 BV 的兜底：还是唱最高分，但日志里留清楚这是低置信
+            print(f"LOW_CONFIDENCE={ranked.get('reason') or '不确定'}", file=sys.stderr, flush=True)
 
     v = video.Video(bvid, credential=cred)
     try:
@@ -272,13 +471,17 @@ async def run(args):
     except Exception as e:  # noqa: BLE001
         if direct:
             detail = re.sub(r"\s*\{.*$", "", str(e), flags=re.S).strip()[:80]
-            raise RuntimeError(f"这个 BV 号（{bvid}）打不开：视频不存在、被删或者需要登录（B站说：{detail}）") from e
+            raise RuntimeError(
+                f"这个 BV 号（{bvid}）打不开：视频不存在、被删或者需要登录（B站说：{detail}）"
+            ) from e
         raise
     title = title or info.get("title", bvid)
     duration = int(info.get("duration") or duration or 0)
     if duration and duration > hard_limit:
         raise RuntimeError(f"《{title[:30]}》太长了（{duration // 60}分{duration % 60}秒），换首短点的吧")
 
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
     urls, ext = await get_audio_url(v, 0)
     dest = workdir / f"source.{ext}"
     size = await download(urls, dest, cookies_from(cred))
@@ -290,15 +493,25 @@ async def run(args):
         "duration": duration,
         "singer": info.get("owner", {}).get("name", ""),
         "keyword": keyword,
+        "picked": picked_note,
         "file": str(dest),
         "bytes": size,
     }
 
 
+def rank_note(ranked: dict, pick: dict) -> str:
+    if ranked.get("confidence") == "high":
+        bits = [b for b in pick.get("reasons", []) if not b.startswith("降权")]
+        return "高置信：" + ("、".join(bits[:3]) or "命中")
+    return "低置信兜底：" + (ranked.get("reason") or "不确定")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--song", required=True)
-    ap.add_argument("--workdir", required=True)
+    ap.add_argument("--song", default="")
+    ap.add_argument("--bvid", default="", help="已知 BV 号：跳过搜索直接下载")
+    ap.add_argument("--plan", action="store_true", help="只搜不下载，输出 PLAN=<json>")
+    ap.add_argument("--workdir", default="", help="下载目录（--plan 时可省略）")
     ap.add_argument("--credential", default="", help="bili-duty 的 bili_credential.json 路径")
     ap.add_argument("--max-minutes", dest="max_minutes", type=float, default=9.0)
     ap.add_argument("--sessdata", default="")
@@ -306,9 +519,12 @@ def main():
     ap.add_argument("--buvid3", default="")
     ap.add_argument("--dedeuserid", default="")
     args = ap.parse_args()
+    if not args.workdir and not args.plan:
+        ap.error("--workdir is required unless --plan")
     try:
         result = asyncio.run(run(args))
-        print("RESULT=" + json.dumps(result, ensure_ascii=False))
+        if result is not None:
+            print("RESULT=" + json.dumps(result, ensure_ascii=False))
     except Exception as e:  # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         print("ERROR=" + str(e).replace("\n", " ")[:300])

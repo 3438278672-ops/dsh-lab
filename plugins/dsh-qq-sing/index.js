@@ -65,7 +65,7 @@ const DEFAULTS = {
   defaultTarget: '',
   // 每个点歌人的内置 CD（默认 1 小时；给 0 = 关闭）
   cooldownMs: 60 * 60 * 1000,
-  // 不受 CD 限制的 QQ 号（本人调试用，例如 ["100000002"]）
+  // 不受 CD 限制的 QQ 号（本人调试用，例如 ["2220222310"]）
   cooldownBypassUids: [],
   // 悬浮球排队卡片读数据的本机端口（dsh-orb 的悬浮球页面轮询 /qqsing.json）
   queuePort: 31877,
@@ -123,6 +123,26 @@ function statePath(cfg) {
 
 function lockPath(cfg) {
   return join(cfg.home, 'busy.lock')
+}
+
+function pausedPath(cfg) {
+  return join(cfg.home, 'paused.json')
+}
+
+/**
+ * 点歌开关：paused=true 时只拒绝新点歌——在唱的那首照常唱完，排单保留、等恢复后再起。
+ * 状态落盘（paused.json），重启 DSH / 插件后仍然记得。
+ */
+async function readPaused(cfg) {
+  const raw = await readJson(pausedPath(cfg))
+  return Boolean(raw && raw.paused)
+}
+
+async function writePaused(cfg, paused, by) {
+  await mkdir(cfg.home, { recursive: true }).catch(() => {})
+  const next = { paused: Boolean(paused), updatedAt: Date.now(), updatedBy: String(by || 'orb') }
+  await writeFile(pausedPath(cfg), JSON.stringify(next, null, 2), 'utf8')
+  return next
 }
 
 /** 读当前任务状态；已结束的（有 finishedAt）不算忙。 */
@@ -333,13 +353,15 @@ async function dropQueueWithRefund(cfg) {
 
 const QUEUE_CORS = {
   'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
   'access-control-allow-headers': 'content-type',
 }
 
 /**
  * 悬浮球排队卡片的数据源：本机只读 HTTP 端口。
  * dsh-orb 的悬浮球页面（file:// 页面）用 fetch 轮询 GET /qqsing.json。
+ * POST /qqsing/pause?on=1|0 是那页卡片上的暂停键——只接受本机页面（file:// 的 Origin 是 null）
+ * 和本机程序；浏览器里别的网站带 Origin 过来会被拒，防止随手一个网页就能把点歌停掉。
  */
 function startQueueServer(cfg) {
   const port = Number(cfg.queuePort)
@@ -351,7 +373,27 @@ function startQueueServer(cfg) {
         res.writeHead(204, QUEUE_CORS).end()
         return
       }
-      const pathname = String(req.url || '/').split('?')[0]
+      const url = new URL(String(req.url || '/'), 'http://127.0.0.1')
+      const pathname = url.pathname
+      if (pathname === '/qqsing/pause') {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('method not allowed')
+          return
+        }
+        const origin = String(req.headers.origin || '')
+        const localOrigin = origin === '' || origin === 'null' || origin === `http://127.0.0.1:${port}`
+        if (!localOrigin) {
+          res.writeHead(403, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('forbidden origin')
+          return
+        }
+        const raw = String(url.searchParams.get('on') ?? '1').toLowerCase()
+        const on = ['1', 'true', 'on', 'yes'].includes(raw)
+        const next = await writePaused(cfg, on, 'orb')
+        res
+          .writeHead(200, { ...QUEUE_CORS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          .end(JSON.stringify({ ok: true, paused: next.paused, now: Date.now() }))
+        return
+      }
       if (pathname !== '/qqsing.json') {
         res.writeHead(404, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('not found')
         return
@@ -387,7 +429,7 @@ function startQueueServer(cfg) {
       }))
       res
         .writeHead(200, { ...QUEUE_CORS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        .end(JSON.stringify({ ok: true, now: Date.now(), active, queue, recent }))
+        .end(JSON.stringify({ ok: true, now: Date.now(), paused: await readPaused(cfg), active, queue, recent }))
     } catch {
       res.writeHead(500, QUEUE_CORS).end('{}')
     }
@@ -404,7 +446,7 @@ function startQueueServer(cfg) {
 }
 
 /** 起一个 detached worker 去唱一首，返回 qq_sing 的返回体。 */
-async function startJob(cfg, { song, target, requester, whitelisted, markCd = true }) {
+async function startJob(cfg, { song, target, requester, whitelisted, markCd = true, bvid = '', expectedTitle = '' }) {
   const jobId = `sing-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`
   if (!(await acquireLock(cfg, jobId))) {
     const current = await readActiveJob(cfg)
@@ -419,6 +461,8 @@ async function startJob(cfg, { song, target, requester, whitelisted, markCd = tr
       home: cfg.home,
       jobDir,
       song,
+      bvid,
+      expectedTitle,
       requester,
       whitelisted,
       target,
@@ -458,7 +502,7 @@ async function startJob(cfg, { song, target, requester, whitelisted, markCd = tr
       jobId,
       pid: child.pid,
       song,
-      title: '',
+      title: expectedTitle || '',
       target,
       targetName: '',
       requester,
@@ -481,6 +525,7 @@ async function startJob(cfg, { song, target, requester, whitelisted, markCd = tr
       await markCooldown(cfg.home, requester, song, target).catch(() => {})
     }
 
+    const shown = String(expectedTitle || song).slice(0, 30)
     return {
       ok: true,
       started: true,
@@ -488,7 +533,7 @@ async function startJob(cfg, { song, target, requester, whitelisted, markCd = tr
       jobId,
       song,
       target,
-      summary: `🎤 收到${/^BV[0-9A-Za-z]{10}$/.test(song) ? '这首歌' : `《${song}》`}～后台这就去 B 站找原曲、翻唱，唱好了一条条发出来（第一首大概 1-2 分钟，整首几分钟发完）。`,
+      summary: `🎤 收到${/^BV[0-9A-Za-z]{10}$/.test(song) ? '这首歌' : `《${shown}》`}～后台这就去 B 站取原曲、翻唱，唱好了一条条发出来（第一首大概 1-2 分钟，整首几分钟发完）。`,
     }
   } catch (error) {
     await releaseLock(cfg, jobId)
@@ -496,11 +541,156 @@ async function startJob(cfg, { song, target, requester, whitelisted, markCd = tr
   }
 }
 
-/**
- * 排单调度的一轮：空闲就把队头那首起起来；起不来就原样塞回队头。
- * 抽成函数是为了能被测试直接调用（以前逻辑埋在 setInterval 里，抢锁失败丢单这条测不到）。
- */
+// ── 落单：有歌在唱就排队，空闲就直接起唱 ──────────────────────────────
+async function placeOrder(cfg, { song, bvid = '', expectedTitle = '', target, requester, whitelisted }) {
+  const active = await readActiveJob(cfg)
+  const queued = await readQueue(cfg.home)
+  if (isBusy(active) || queued.length > 0) {
+    // 排队的人这会不会被 worker 补名字（还没起唱），入队时先查一次
+    const names = await resolveNames({ bridgeDir: cfg.bridgeDir, target, requester })
+    const shown = String(expectedTitle || song).slice(0, 60)
+    const result = await enqueue(
+      cfg.home,
+      { song, bvid, expectedTitle: shown, target, requester, whitelisted, ...names },
+      Number(cfg.maxQueue) || QUEUE_LIMIT,
+    )
+    if (!result.ok) {
+      return {
+        ok: false,
+        queueFull: true,
+        whitelisted,
+        summary: `🎤 排单已经 ${result.size} 首啦，这首先等等吧（等前面唱完再来点）。`,
+      }
+    }
+    if (!whitelisted) await markCooldown(cfg.home, requester, song, target).catch(() => {})
+    const ahead = result.position - 1
+    return {
+      ok: true,
+      queued: true,
+      position: result.position,
+      whitelisted,
+      song: shown,
+      target,
+      summary: `🎤 排上了，前面还有 ${ahead} 首（大概 ${Math.max(1, ahead * 4 + 2)} 分钟轮到）。`,
+    }
+  }
+  return startJob(cfg, { song, bvid, expectedTitle, target, requester, whitelisted })
+}
+
+// ── 两阶段点歌：先搜（--plan），低置信度先问一句再唱 ──────────────────────
+const PENDING_TTL_MS = 10 * 60 * 1000
+
+function pendingPath(cfg) {
+  return join(cfg.home, 'pending-confirm.json')
+}
+
+async function readPending(cfg) {
+  const raw = await readJson(pendingPath(cfg))
+  const now = Date.now()
+  const out = {}
+  if (raw && typeof raw === 'object') {
+    for (const [token, item] of Object.entries(raw)) {
+      if (item && now - Number(item.at || 0) < PENDING_TTL_MS) out[token] = item
+    }
+  }
+  return out
+}
+
+async function writePending(cfg, map) {
+  await mkdir(cfg.home, { recursive: true }).catch(() => {})
+  await writeFile(pendingPath(cfg), JSON.stringify(map, null, 2), 'utf8')
+}
+
+/** 跑 fetch_song.py --plan：只搜不下载。返回 plan 对象；失败返回 {error}。 */
+function planSong(cfg, song, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    const args = [
+      join(PLUGIN_DIR, 'python', 'fetch_song.py'),
+      '--song',
+      song,
+      '--plan',
+      '--credential',
+      cfg.credentialFile,
+      '--max-minutes',
+      String(cfg.maxSongMinutes),
+    ]
+    let out = ''
+    let err = ''
+    let settled = false
+    const done = (value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const child = spawn(cfg.pythonBili, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // 搜索进程的输出里有中文标题/理由；不锁 UTF-8 会在 Windows 管道里变 cp936 乱码。
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+    })
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+      done({ error: '搜索超时' })
+    }, timeoutMs)
+    child.stdout.on('data', (chunk) => {
+      out += chunk.toString('utf8')
+    })
+    child.stderr.on('data', (chunk) => {
+      err += chunk.toString('utf8')
+    })
+    child.on('error', (e) => done({ error: `搜索进程起不来：${e.message || e}` }))
+    child.on('close', () => {
+      const line = out
+        .split(/\r?\n/)
+        .reverse()
+        .find((l) => l.startsWith('PLAN='))
+      if (!line) {
+        const detail = err
+          .split(/\r?\n/)
+          .reverse()
+          .find((l) => l.startsWith('ERROR='))
+        return done({ error: detail ? detail.slice(6).trim() : err.slice(-300).trim() || '没有拿到搜索结果' })
+      }
+      try {
+        const plan = JSON.parse(line.slice(5))
+        if (!plan?.ok) return done({ error: plan?.error || '搜索失败' })
+        return done({ plan })
+      } catch (e) {
+        return done({ error: `搜索结果解析失败：${e.message || e}` })
+      }
+    })
+  })
+}
+
+function mmss(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+/** 把 plan 变成模型能直接念给人的一段话（纯文本，不带 Markdown）。 */
+function confirmSummary(plan) {
+  const candidates = (plan.candidates || []).slice(0, 3)
+  const lines = candidates.map((c, i) => {
+    const title = String(c.title || c.bvid || '').slice(0, 42)
+    const up = String(c.uploader || '').slice(0, 14)
+    return `${i + 1}️⃣ ${title}（${up || '未知UP'}，${mmss(c.duration)}）`
+  })
+  const why = plan.reason ? `（搜索拿不准：${plan.reason}）` : ''
+  return [
+    `🎤 我找到的是这一首吗？${why}`,
+    ...lines,
+    '回序号就行（比如「2」）；不是的话，直接说准确歌名 / 贴个 BV 号～',
+  ].join('\n')
+}
+
 export async function runQueueTick(cfg, deps = {}) {
+  // 暂停只挡「新点歌」，排队中的也不许起唱——恢复后再按顺序继续。
+  if (deps.paused === true || (deps.paused === undefined && (await readPaused(cfg)))) return { skipped: 'paused' }
   const start = deps.startJob ?? startJob
   if (isBusy(await readActiveJob(cfg))) return { skipped: 'busy' }
   const list = await readQueue(cfg.home)
@@ -509,6 +699,8 @@ export async function runQueueTick(cfg, deps = {}) {
   if (!item) return { skipped: 'lost' }
   const result = await start(cfg, {
     song: item.song,
+    bvid: item.bvid || '',
+    expectedTitle: item.expectedTitle || '',
     target: item.target,
     requester: item.requester,
     whitelisted: Boolean(item.whitelisted),
@@ -621,6 +813,12 @@ export function apply(ctx, config) {
         '调用名就是 qq_sing 本身（不带 mcp__snowluma__ 之类命名空间前缀；若报 unknown tool 说明名字写错了，请用不带前缀的 qq_sing 重试，不要放弃）。' +
         '群友想听你唱歌、点歌（"唱首 xxx"、"来一个 xxx"）时用：传一个歌名或 B 站 BV 号，再传点歌人的 QQ 号（requester，纯数字，从消息发送者取），' +
         '后台会去 B 站找原曲、用 RVC 把整首歌翻唱成本机音色，然后一条条语音发到这个会话（每 30 秒左右一条，一首歌大概 1-2 分钟起唱、几分钟发完）。' +
+        '搜索会优先在 JLRS-jayfm / JLRS-LeoFM 两个频道里找（jayfm 优先，标题要边界命中歌名）；两位频道都没有才回退普通搜索，' +
+        '回退时也一律先问、不自动选。' +
+        '普通搜索会自动认歌名/歌手、避开试听/录音棚/nightcore/翻唱/教学这类不干净的源，优先原唱官方 MV。' +
+        '两阶段：如果搜索很确定，直接开唱（返回 started/queued）；如果拿不准，会返回 needConfirm=true、token 和最多 3 个候选，' +
+        '这时**不要自己挑**，把 summary 原样发到群里问「我找到的是这一首吗？」，等对方回序号（或给出准确歌名/BV 号）后，' +
+        '再调用 qq_sing 传 confirm=token、pick=序号（1 起；对方直接给了新歌名就重新传 song，不要 confirm）。confirm 的 token 10 分钟内有效。' +
         '同一时间只唱一首，忙的时候会排单（最多 5 首）：如果返回 queued=true，说明已经排上了，把 position（前面还有几首、大概几分钟）告诉对方，不要说"唱完再点"；如果返回 queueFull=true，才是排满了，让对方等会儿。' +
         '每个点歌人一小时只能点一首：如果返回 cooldown=true，直接告诉对方还要等多久，不要换别人的 QQ 号绕过。' +
         '点歌白名单（~/.dsh/qq-sing/allowlist.txt）里的人不计时，随便点。' +
@@ -628,22 +826,25 @@ export function apply(ctx, config) {
       parameters: {
         type: 'object',
         properties: {
-          song: { type: 'string', description: '歌名，或者 B 站 BV 号（如 晴天 / BV1d4411N7zD）。80 字以内。' },
+          song: { type: 'string', description: '歌名，或者 B 站 BV 号（如 晴天 / BV1d4411N7zD）。80 字以内。确认候选时可省略。' },
           requester: {
             type: 'string',
             description: '点歌人的 QQ 号（纯数字，从这条群消息的发送者取；不确定就先 qq_get_recent_messages 查 userId，不要瞎填）。',
           },
           target: { type: 'string', description: '会话 key：group:群号 或 private:QQ号，一般传当前会话的 key。' },
+          confirm: { type: 'string', description: '上一轮返回的 needConfirm token。对方确认「就是这个」后传它。' },
+          pick: { type: 'number', description: '确认第几个候选（1 起，默认 1）；只在带 confirm 时有意义。' },
         },
-        required: ['song'],
+        required: ['requester', 'target'],
         additionalProperties: false,
       },
-      timeoutMs: 30000,
+      timeoutMs: 120000,
       output: {
         schema: {
           type: 'object',
           properties: {
             ok: { type: 'boolean' },
+            paused: { type: 'boolean' },
             started: { type: 'boolean' },
             busy: { type: 'boolean' },
             queued: { type: 'boolean' },
@@ -656,6 +857,26 @@ export function apply(ctx, config) {
             jobId: { type: 'string' },
             song: { type: 'string' },
             target: { type: 'string' },
+            needConfirm: { type: 'boolean' },
+            confirm: { type: 'string' },
+            confidence: { type: 'string' },
+            reason: { type: 'string' },
+            candidates: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  pick: { type: 'number' },
+                  bvid: { type: 'string' },
+                  title: { type: 'string' },
+                  uploader: { type: 'string' },
+                  duration: { type: 'number' },
+                  url: { type: 'string' },
+                  score: { type: 'number' },
+                },
+                additionalProperties: true,
+              },
+            },
             summary: { type: 'string' },
           },
           additionalProperties: true,
@@ -663,11 +884,12 @@ export function apply(ctx, config) {
         render: (_args, value) => textResult(value?.summary ?? JSON.stringify(value)),
       },
       async execute(args) {
-        const song = String(args?.song ?? '')
+        const rawSong = String(args?.song ?? '')
           .replace(/\s+/g, ' ')
           .trim()
-        if (!song) throw new Error('要唱哪首？把歌名或者 B 站 BV 号给我。')
-        if (song.length > 80) throw new Error('歌名太长啦，给个短一点的（80 字以内），或者直接贴 BV 号。')
+        const confirmToken = String(args?.confirm ?? '').trim()
+        if (!rawSong && !confirmToken) throw new Error('要唱哪首？把歌名或者 B 站 BV 号给我。')
+        if (rawSong.length > 80) throw new Error('歌名太长啦，给个短一点的（80 字以内），或者直接贴 BV 号。')
 
         const rawTarget = String(args?.target ?? cfg.defaultTarget ?? '').trim()
         const parsed = parseTarget(rawTarget)
@@ -681,6 +903,18 @@ export function apply(ctx, config) {
         if (!requester) {
           throw new Error('点歌人的 QQ 号没给我：把 requester 填上（群消息里发送者的 QQ 号，纯数字），不然没法算点歌 CD。')
         }
+
+        // —— 暂停开关：只挡新点歌，在唱和已排的不动 ——
+        if (await readPaused(cfg)) {
+          return {
+            ok: false,
+            paused: true,
+            requester,
+            target: targetKey,
+            summary: '⏸️ 点歌暂停中：悬浮球卡片右上角的「恢复」按一下就能继续点，这首先不接啦。',
+          }
+        }
+
         const cooldownMs = Number(cfg.cooldownMs ?? 3600000)
         const bypass = new Set((cfg.cooldownBypassUids ?? []).map(String))
         const allowlist = await readAllowlist(cfg.home)
@@ -700,39 +934,115 @@ export function apply(ctx, config) {
           }
         }
 
-        // —— 排单：有歌在唱/在合成，就往后排（不再直接拒绝）——
-        const active = await readActiveJob(cfg)
-        const queued = await readQueue(cfg.home)
-        if (isBusy(active) || queued.length > 0) {
-          // 排队的人这会不会被 worker 补名字（还没起唱），入队时先查一次
-          const names = await resolveNames({ bridgeDir: cfg.bridgeDir, target: targetKey, requester })
-          const result = await enqueue(
-            cfg.home,
-            { song, target: targetKey, requester, whitelisted, ...names },
-            Number(cfg.maxQueue) || QUEUE_LIMIT,
-          )
-          if (!result.ok) {
-            return {
-              ok: false,
-              queueFull: true,
-              whitelisted,
-              summary: `🎤 排单已经 ${result.size} 首啦，这首先等等吧（等前面唱完再来点）。`,
-            }
+        // —— 确认分支：对方回了个序号，按之前存的候选唱 ——
+        if (confirmToken) {
+          const pending = await readPending(cfg)
+          const entry = pending[confirmToken]
+          if (!entry) throw new Error('这个确认已经过期了（或者没找到），重新点一次吧，我再搜一遍。')
+          if (entry.target !== targetKey) throw new Error('这个确认不是发给这个会话的，重新点一次吧。')
+          if (String(entry.requester) !== String(requester)) {
+            throw new Error('这个确认是给另一位点歌人的，你点的话重新说一遍歌名吧。')
           }
-          if (!whitelisted) await markCooldown(cfg.home, requester, song, targetKey).catch(() => {})
-          const ahead = result.position - 1
-          return {
-            ok: true,
-            queued: true,
-            position: result.position,
-            whitelisted,
-            song,
+          const list = (entry.plan?.candidates ?? []).filter((c) => c?.bvid).slice(0, 5)
+          if (!list.length) throw new Error('这个确认里没有可选的结果了，重新点一次吧。')
+          const pickIndex = Math.min(Math.max(1, Math.round(Number(args?.pick) || 1)), list.length)
+          const chosen = list[pickIndex - 1]
+
+          delete pending[confirmToken]
+          await writePending(cfg, pending).catch(() => {})
+
+          const result = await placeOrder(cfg, {
+            song: String(chosen.title || entry.song).slice(0, 80),
+            bvid: chosen.bvid,
+            expectedTitle: String(chosen.title || ''),
             target: targetKey,
-            summary: `🎤 排上了，前面还有 ${ahead} 首（大概 ${Math.max(1, ahead * 4 + 2)} 分钟轮到）。`,
-          }
+            requester,
+            whitelisted,
+          })
+          return result
         }
 
-        return startJob(cfg, { song, target: targetKey, requester, whitelisted })
+        // —— 直接贴了 BV：不用搜，也不用确认 ——
+        const bvMatch = rawSong.match(/BV[0-9A-Za-z]{10}/)
+        if (bvMatch) {
+          return placeOrder(cfg, {
+            song: bvMatch[0],
+            bvid: bvMatch[0],
+            expectedTitle: '',
+            target: targetKey,
+            requester,
+            whitelisted,
+          })
+        }
+
+        // —— 先搜一搜（只搜不下），确定就直接唱，拿不准先问 ——
+        const planned = await planSong(cfg, rawSong)
+        if (!planned.plan) {
+          // 搜索接口闹脾气时别把人卡死：退回老办法，但说明这次可能不准
+          const result = await placeOrder(cfg, {
+            song: rawSong,
+            target: targetKey,
+            requester,
+            whitelisted,
+          })
+          if (result?.summary) result.summary += `（不过刚才搜索没拿准：${planned.error || '接口异常'}，这次是按老办法挑的，可能不是你要的版本）`
+          return result
+        }
+
+        const plan = planned.plan
+        if (plan.confidence === 'high' && plan.pick?.bvid) {
+          return placeOrder(cfg, {
+            song: String(plan.pick.title || rawSong).slice(0, 80),
+            bvid: plan.pick.bvid,
+            expectedTitle: String(plan.pick.title || ''),
+            target: targetKey,
+            requester,
+            whitelisted,
+          })
+        }
+
+        // 低置信度：存下来，让模型去群里问一句
+        const token = randomBytes(4).toString('hex')
+        const pending = await readPending(cfg)
+        pending[token] = {
+          at: Date.now(),
+          song: rawSong,
+          target: targetKey,
+          requester,
+          plan: {
+            keyword: plan.keyword || rawSong,
+            confidence: plan.confidence,
+            reason: plan.reason || '',
+            pick: plan.pick || null,
+            candidates: (plan.candidates ?? []).slice(0, 5),
+          },
+        }
+        // 同一个点歌人最多留 3 条待确认，别让文件越堆越大
+        const mine = Object.entries(pending)
+          .filter(([, v]) => String(v.requester) === String(requester))
+          .sort((a, b) => (b[1].at || 0) - (a[1].at || 0))
+        for (const [oldToken] of mine.slice(3)) delete pending[oldToken]
+        await writePending(cfg, pending)
+
+        return {
+          ok: true,
+          needConfirm: true,
+          confirm: token,
+          confidence: plan.confidence,
+          reason: plan.reason || '',
+          requester,
+          target: targetKey,
+          candidates: (plan.candidates ?? []).slice(0, 3).map((c, i) => ({
+            pick: i + 1,
+            bvid: c.bvid,
+            title: c.title,
+            uploader: c.uploader || '',
+            duration: Number(c.duration) || 0,
+            url: c.url || `https://www.bilibili.com/video/${c.bvid}`,
+            score: c.score,
+          })),
+          summary: confirmSummary(plan),
+        }
       },
     }),
   )
