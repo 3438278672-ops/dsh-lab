@@ -19,6 +19,14 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | --- | --- |
 | ![sticker](docs/samples/sticker_512.jpg) | ![landscape](docs/samples/landscape_1216x832.jpg) |
 
+## 画自己 / 大肥鱼
+
+「画你 / 画大肥鱼 / 画 DeepSeek-chan」有固定人设：蓝发鲸娘女仆（人设图由号主提供，
+原图授权 CC BY-NC-SA 4.0，不随仓库分发）。固定 tag、按用途裁剪的写法与来源说明见
+[docs/characters/deepseek-chan.md](docs/characters/deepseek-chan.md)。
+
+![DeepSeek-Chan](docs/samples/deepseek-chan_832x1216.jpg)
+
 ## 特性
 
 | 能力 | 说明 |
