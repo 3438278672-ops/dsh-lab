@@ -16,9 +16,9 @@ hands together, light blue background, soft lighting
 ```
 
 小技巧：全身立绘把 `full body, standing` 放最前面、`light blue background` 带上权重 `(…:1.2~1.3)`，
-否则容易只出半身、背景变成室内。插件会自动补 `masterpiece, best quality, very aesthetic, absurdres`
-与默认负面词；negative 里再补 `text, watermark, logo, multiple views, character sheet, indoor, wooden`，
-避免画成三视图设定集或木屋背景。
+否则容易只出半身、背景变成室内。插件会自动补 `masterpiece, best quality, very aesthetic, absurdres, perfect hands`
+与默认负面词（含手指数/多手多指/肢体/比例硬约束，negative 只能追加、不能替换）；negative 里再补
+`text, watermark, logo, multiple views, character sheet, indoor, wooden`，避免画成三视图设定集或木屋背景。
 
 ## 按用途裁剪
 

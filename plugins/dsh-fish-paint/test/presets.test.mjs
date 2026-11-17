@@ -88,10 +88,20 @@ test('variants 收敛 1–maxVariants，steps/cfg 夹到合法区间', () => {
   assert.equal(buildArgs({ prompt: 'x', cfg: -1 }).cfg, 1)
 })
 
-test('显式负面词优先，非法值回落默认负面词', () => {
-  assert.equal(buildArgs({ prompt: 'x', negative: 'ugly, lowres' }).negative, 'ugly, lowres')
+test('显式负面词追加在默认负面词之后，不能替换默认硬约束', () => {
+  const merged = buildArgs({ prompt: 'x', negative: 'ugly, lowres' }).negative
+  assert.ok(merged.startsWith(DEFAULT_NEGATIVE), '默认负面词应该在最前面，且完整保留')
+  assert.ok(merged.endsWith('ugly'), '调用方追加的词在最后')
+  assert.equal(merged.split(', ').filter((tag) => tag === 'lowres').length, 1, '重复 tag 去重')
+
   assert.equal(buildArgs({ prompt: 'x', negative: '   ' }).negative, DEFAULT_NEGATIVE)
   assert.equal(buildArgs({ prompt: 'x', negative: null }).negative, DEFAULT_NEGATIVE)
+
+  // 手部/肢体的通用硬约束对每张图都生效
+  for (const tag of ['extra fingers', 'fewer fingers', 'extra digits', 'extra limbs', 'bad proportions']) {
+    assert.ok(buildArgs({ prompt: 'x' }).negative.includes(tag), `默认负面词缺少 ${tag}`)
+  }
+  assert.ok(buildArgs({ prompt: 'x' }).prompt.includes('perfect hands'), '正向质量词含 perfect hands')
 })
 
 test('中文逗号/顿号/换行都能切 tag，去重大小写无关', () => {

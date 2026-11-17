@@ -4,11 +4,15 @@
 // 规则：tag 去空、去重（大小写无关）、尺寸按 8 的倍数取整、变体数收敛到 1–maxVariants。
 
 /** 正向质量词（Illustrious 向），anime / portrait / landscape 预设都会自动补上。 */
-export const QUALITY = 'masterpiece, best quality, very aesthetic, absurdres'
+export const QUALITY = 'masterpiece, best quality, very aesthetic, absurdres, perfect hands'
 
-/** 默认负面词（CONTRACT.md §4 钉死，别改）。 */
+/**
+ * 默认负面词（CONTRACT.md §4）：质量 + 通用硬约束。
+ * 硬约束部分（手/手指数量、多余肢体、比例、脸崩）是「始终生效」的——
+ * 调用方传 negative 只会追加到这一串后面，不会替换掉它。
+ */
 export const DEFAULT_NEGATIVE =
-  'lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated'
+  'lowres, bad anatomy, bad hands, poorly drawn hands, mutated hands, malformed hands, extra hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, bad proportions, extra limbs, missing limbs, extra arms, extra legs, long neck, poorly drawn face, deformed face, asymmetrical eyes, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated'
 
 /** 可用的画风预设名。 */
 export const PRESET_NAMES = ['anime', 'portrait', 'landscape', 'sticker']
@@ -117,7 +121,7 @@ export function normalizeSeed(value) {
  * @param {object} input
  * @param {string} [input.preset]     预设名，未知回落 anime
  * @param {string} [input.prompt]     正向 tag（调用方负责翻译成英文 danbooru tags）
- * @param {string} [input.negative]   显式负面词；不传/空串 = 用 DEFAULT_NEGATIVE
+ * @param {string} [input.negative]   额外负面词；追加到 DEFAULT_NEGATIVE 之后（不能替换默认硬约束）
  * @param {number} [input.width]      覆盖预设宽度（8 的倍数取整）
  * @param {number} [input.height]     覆盖预设高度
  * @param {number} [input.steps]      默认 28
@@ -139,7 +143,11 @@ export function buildArgs(input = {}) {
   ])
 
   const explicitNegative = typeof input.negative === 'string' ? input.negative.trim() : ''
-  const negative = explicitNegative ? joinTags(splitTags(explicitNegative)) : DEFAULT_NEGATIVE
+  // 默认负面词（含手/肢体硬约束）始终生效；调用方的 negative 只追加，不替换。
+  const negative = joinTags([
+    ...splitTags(DEFAULT_NEGATIVE),
+    ...splitTags(explicitNegative),
+  ])
 
   const width = roundSize(input.width, preset.width)
   const height = roundSize(input.height, preset.height)

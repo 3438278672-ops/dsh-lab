@@ -36,6 +36,7 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | `draw_setup` | 一键安装（后台）、冒烟验证、只读状态 |
 | `draw_recent` | 回看最近生成（按条数 / 日期 / target 过滤） |
 | 预设 | `anime` 1024²、`portrait` 832×1216、`landscape` 1216×832、`sticker` 1024² 出图后缩到 512² |
+| 默认负面词 | 质量词 + 手部/肢体硬约束始终生效：`bad hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, extra limbs, bad proportions …`；自定义 negative 只能**追加**，不能替换 |
 | R18 硬闸 | 每张图带 rating sidecar，发送时由 qq-bridge 的 r18-guard 判定，群聊默认发不出去 |
 
 ## 环境要求
@@ -81,7 +82,7 @@ DeepSeek Harness 的画图插件：本地常驻一个 diffusers worker（Illustr
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `prompt` | string，必填 | 英文 danbooru tags，逗号分隔 |
-| `negative` | string | 负面词；不传用默认那一串 |
+| `negative` | string | 额外负面词；追加在默认负面词之后（含手指数/肢体/比例硬约束，不能替换） |
 | `preset` | `anime` / `portrait` / `landscape` / `sticker` | 画风与尺寸预设，默认 `anime` |
 | `width` / `height` | number | 覆盖预设尺寸，按 8 取整，范围 256-2048 |
 | `steps` | number | 采样步数，默认 28（4-80） |

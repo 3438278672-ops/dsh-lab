@@ -112,12 +112,12 @@ data/                     models/（6.6G）、.venv/、out/、state/
 
 | preset | 尺寸 | 说明 |
 | --- | --- | --- |
-| anime（默认） | 1024×1024 | 正向补 `masterpiece, best quality, very aesthetic, absurdres` |
+| anime（默认） | 1024×1024 | 正向补 `masterpiece, best quality, very aesthetic, absurdres, perfect hands` |
 | portrait | 832×1216 | 立绘/半身 |
 | landscape | 1216×832 | 场景/横图 |
 | sticker | 1024² → 存 512² | `chibi, simple background, thick outline, vibrant colors` |
 
-默认负面词（Illustrious 向）：`lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated`
+默认负面词（Illustrious 向，质量 + 手部/肢体硬约束；2026-11-17 用户要求补通用限制词）：`lowres, bad anatomy, bad hands, poorly drawn hands, mutated hands, malformed hands, extra hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, bad proportions, extra limbs, missing limbs, extra arms, extra legs, long neck, poorly drawn face, deformed face, asymmetrical eyes, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated`；调用方 negative 只能追加，不能替换默认串。
 
 ## 8. 目录与数据
 

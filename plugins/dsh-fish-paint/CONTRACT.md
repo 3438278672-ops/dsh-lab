@@ -130,9 +130,10 @@ status 回应：
   export async function sendImages({key, paths, text, bridgeDir, tmpDir}) // resolve {ok, kind, id, sent:[{path,messageId}]}；失败抛 Error，message 可直接给人看
   ```
 - **输出契约**：PNG 存 `data/out/YYYY-MM-DD/`；同名 `.json` 元数据字段：`prompt, negative, preset, width, height, steps, cfg, seed, model, engine:{vramMode,loadSec}, rating, target, note, createdAt`；同名 `.png.meta.json` sidecar：`{"rating":"all"|"r18","source":"dsh-fish-paint","createdAt":ISO}`（rating: sfw→all，nsfw→r18），**sidecar 路径必须是 `<png路径>.meta.json`**（跟 bridge 的 r18-guard 契约完全对齐）。
-- 默认负面词（presets.js）：
-  `lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated`
-- 质量词（anime/portrait/landscape 正向追加）：`masterpiece, best quality, very aesthetic, absurdres`
+- 默认负面词（presets.js，2026-11-17 用户要求加通用硬约束）：
+  `lowres, bad anatomy, bad hands, poorly drawn hands, mutated hands, malformed hands, extra hands, extra fingers, fewer fingers, missing fingers, fused fingers, extra digits, bad proportions, extra limbs, missing limbs, extra arms, extra legs, long neck, poorly drawn face, deformed face, asymmetrical eyes, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad eyes, mutated`
+  调用方传 `negative` 时**追加**到该串之后（不能替换），保证手指数/肢体/比例约束对每张图生效。
+- 质量词（anime/portrait/landscape 正向追加）：`masterpiece, best quality, very aesthetic, absurdres, perfect hands`
 - 预设：anime 1024×1024；portrait 832×1216；landscape 1216×832；sticker 1024×1024 + `chibi, simple background, thick outline, vibrant colors`，存 512×512（通过 worker 的 resize）。
 - 工具返回：`[{type:'text', text: JSON.stringify(payload)}]`，payload 含 `ok` 与 `summary`（人话）。
 - 工具超时：draw_image `timeoutMs: 600000`。
