@@ -1,0 +1,36 @@
+{
+  "name": "dsh-gpu-queue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "本机 GPU 令牌队列：把「画一张 / 翻唱一段 / 合成一句」串成一条队列，唱歌前先让画图引擎让出显存",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/3438278672-ops/dsh-lab.git",
+    "directory": "plugins/dsh-gpu-queue"
+  },
+  "homepage": "https://github.com/3438278672-ops/dsh-lab/tree/main/plugins/dsh-gpu-queue",
+  "exports": {
+    ".": "./index.js",
+    "./core": "./lib/queue-core.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "test",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

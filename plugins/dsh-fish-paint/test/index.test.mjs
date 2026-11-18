@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createServer } from 'node:http'
 import { apply, inject, name, pickModelKey } from '../index.js'
 
 function makeCtx() {
@@ -33,11 +34,50 @@ function makeCtx() {
   return { ctx, tools, sections, disposers }
 }
 
-function setup() {
+// 假 GPU 队列：立刻发牌（draw_image 的暂停/限流之后就是领牌，没有它用例会先撞 QUEUE_UNAVAILABLE）。
+function startFakeQueue() {
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      const send = (payload) => {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify(payload))
+      }
+      if (url.pathname === '/gpu/acquire') return send({ ok: true, state: 'granted', id: 't-1' })
+      if (url.pathname === '/gpu/ticket') return send({ ok: true, state: 'granted', id: 't-1' })
+      if (url.pathname === '/gpu/release') return send({ ok: true, released: true })
+      if (url.pathname === '/gpu/heartbeat') return send({ ok: true, state: 'granted' })
+      if (url.pathname === '/gpu/state') return send({ ok: true, holder: null, queue: [], recent: [] })
+      send({ ok: false, error: { code: 'NOT_FOUND', message: 'no route' } })
+    })
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({
+        url: `http://127.0.0.1:${server.address().port}`,
+        close: () => new Promise((done) => server.close(done)),
+      })
+    })
+  })
+}
+
+async function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fish-paint-index-'))
   const dataDir = path.join(root, 'data')
+  const queue = await startFakeQueue()
   const { ctx, tools, sections, disposers } = makeCtx()
-  apply(ctx, { dataDir, bridgeDir: path.join(root, 'no-such-bridge') })
+  apply(ctx, {
+    dataDir,
+    bridgeDir: path.join(root, 'no-such-bridge'),
+    controlPort: 0,
+    servicesDir: path.join(root, 'services'),
+    gpuQueueUrl: queue.url,
+    gpuQueuePollMs: 100,
+  })
   const cleanup = () => {
     for (const dispose of disposers.reverse()) {
       try {
@@ -46,6 +86,7 @@ function setup() {
         /* 已经关掉 */
       }
     }
+    queue.close().catch(() => {})
     try {
       fs.rmSync(root, { recursive: true, force: true })
     } catch {
@@ -55,10 +96,10 @@ function setup() {
   return { root, dataDir, tools, sections, cleanup }
 }
 
-test('导出约定与注册：4 个工具 + fish-paint 提示词 section', () => {
+test('导出约定与注册：4 个工具 + fish-paint 提示词 section', async () => {
   assert.equal(name, 'dsh-fish-paint')
   assert.deepEqual(inject, ['tools', 'systemPrompt'])
-  const { tools, sections, cleanup } = setup()
+  const { tools, sections, cleanup } = await setup()
   try {
     assert.deepEqual([...tools.keys()].sort(), ['draw_image', 'draw_recent', 'draw_setup', 'draw_status'])
     for (const tool of tools.values()) {
@@ -86,7 +127,7 @@ test('导出约定与注册：4 个工具 + fish-paint 提示词 section', () =>
 })
 
 test('draw_image 参数校验：prompt 必填、target 格式错误都返回 ok:false', async () => {
-  const { tools, cleanup } = setup()
+  const { tools, cleanup } = await setup()
   try {
     const drawImage = tools.get('draw_image')
     const noPrompt = await drawImage.execute({})
@@ -105,7 +146,7 @@ test('draw_image 参数校验：prompt 必填、target 格式错误都返回 ok:
 })
 
 test('draw_image 未安装时给 NOT_INSTALLED + 安装建议，不 spawn 任何进程', async () => {
-  const { tools, cleanup } = setup()
+  const { tools, cleanup } = await setup()
   try {
     const payload = await tools.get('draw_image').execute({ prompt: '1girl, solo, silver hair', preset: 'sticker' })
     assert.equal(payload.ok, false)
@@ -118,7 +159,7 @@ test('draw_image 未安装时给 NOT_INSTALLED + 安装建议，不 spawn 任何
 })
 
 test('draw_status：未安装时 installed=false、next 指向 draw_setup install', async () => {
-  const { tools, cleanup } = setup()
+  const { tools, cleanup } = await setup()
   try {
     const payload = await tools.get('draw_status').execute({})
     assert.equal(payload.ok, true)
@@ -136,7 +177,7 @@ test('draw_status：未安装时 installed=false、next 指向 draw_setup instal
 })
 
 test('draw_setup：status 只读；未知 action 返回 BAD_REQUEST', async () => {
-  const { tools, cleanup } = setup()
+  const { tools, cleanup } = await setup()
   try {
     const drawSetup = tools.get('draw_setup')
     const status = await drawSetup.execute({ action: 'status' })
@@ -153,7 +194,7 @@ test('draw_setup：status 只读；未知 action 返回 BAD_REQUEST', async () =
 })
 
 test('draw_recent：空目录返回 0 条；date 格式错误返回 BAD_REQUEST', async () => {
-  const { tools, cleanup } = setup()
+  const { tools, cleanup } = await setup()
   try {
     const drawRecent = tools.get('draw_recent')
     const empty = await drawRecent.execute({ limit: 5 })

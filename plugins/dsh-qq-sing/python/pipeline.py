@@ -25,6 +25,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gpuqueue import GpuQueue  # noqa: E402  同目录的本机 GPU 队列客户端
+
 GSV = r"D:\GSV\GPT-SoVITS-v2pro-20250604"
 GSV_PY = os.path.join(GSV, "runtime", "python.exe")
 RVC = r"D:\GSV\rvc\RVC"
@@ -356,8 +359,6 @@ def median_f0(path):
 
 
 def convert(workdir, vocal, segments, pitch=0, secs=None):
-    sys.path.insert(0, r"D:\GSV\rvc")
-    from gpulock import gpu_lock
     chunks = os.path.join(workdir, "chunks")
     conv = os.path.join(workdir, "conv")
     shutil.rmtree(chunks, ignore_errors=True)
@@ -375,17 +376,8 @@ def convert(workdir, vocal, segments, pitch=0, secs=None):
 
     stage("rvc", "%d" % len(plan))
     t0 = time.time()
-    lock = gpu_lock("rvc").acquire()   # 同一时刻只允许一个任务吃显存
-    log("GPU 锁已获取，开始转换")
-    try:
-        _convert_groups(chunks, conv, plan, pitch)
-    finally:
-        # 以前要等进程退出才靠 atexit 放锁，后面的混音/切片一直白占着显存
-        try:
-            lock.release()
-            log("GPU 锁已释放")
-        except Exception as exc:
-            log("释放 GPU 锁失败：%s" % exc)
+    log("开始转换（GPU 令牌由上层持有，从分离一直占到转换结束）")
+    _convert_groups(chunks, conv, plan, pitch)
 
     missing = [n for _, _, _, n, _, _ in plan if not os.path.exists(os.path.join(conv, n + ".wav"))]
     if missing:
@@ -633,6 +625,11 @@ def main():
         except Exception as exc:
             log("songcheck skipped: %s" % exc)
 
+    # 显卡是画图和翻唱共用的：分离和 RVC 都要吃显存，先跟 dsh-gpu-queue 领一张牌，
+    # 轮到我们才上卡（队列没装/连不上就照唱，画画那边会自己拒绝，不会撞车）。
+    gpu = GpuQueue(log=log)
+    ticket = gpu.acquire_or_warn("sing", "唱《%s》" % (args.title or args.song or "一首歌"))
+
     stage("separate")
     vocal, ins = separate(work, wav)
     voc_dur = ffprobe_duration(vocal)
@@ -681,6 +678,9 @@ def main():
     log("SEGMENTS=%d" % len(segments))
 
     plan = convert(work, vocal, segments, pitch, secs)
+    if ticket:
+        ticket.release()   # 转换完就还牌，后面的混音/切片不吃显存
+        ticket = None
     converted = concat_converted(work, plan)
     conv_dur = ffprobe_duration(converted)
     offset = segments[0][0]

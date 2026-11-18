@@ -2,7 +2,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai)（下称 DSH）写的插件与本地 MCP 服务合集。
 
-不是示例代码，也不是 demo：这十一个项目都在一台 Windows 机器上真实跑着——群里有人点歌它真的会唱，发一张图它真的会去反查，说一句「画个……」它真的会在本机显卡上画出图，三个月前的那句话也真的能翻出来，Pixiv / B 站的 MCP 每天都在被智能体调用。这里放的是能在自己机器上复现的那部分源码。
+不是示例代码，也不是 demo：这十三个项目都在一台 Windows 机器上真实跑着——群里有人点歌它真的会唱，发一张图它真的会去反查，说一句「画个……」它真的会在本机显卡上画出图，三个月前的那句话也真的能翻出来，桌面右下角那颗球真的能掐掉正在唱的歌，Pixiv / B 站的 MCP 每天都在被智能体调用。这里放的是能在自己机器上复现的那部分源码。
 
 > 2026 年 9–11 月，围绕「让智能体真的能干活」做的一批东西。
 
@@ -21,11 +21,13 @@
 | [dsh-adb-phone](plugins/dsh-adb-phone) | 用 adb 操作一台真手机：截图 / UI 树 / 点击 / 输入 / 按键 / 应用 | adb、ADBKeyboard（中文输入） |
 | [dsh-qq-archive](plugins/dsh-qq-archive) | 把群聊历史落成本地索引：全文搜、群友档案、群聊日报/周报/月报、@ 关系看板、自然语言问答、活跃日历、链接资源库、群梗考古、名场面、活跃榜、日报主动推送、给 QQ 桥的熟人卡 | SQLite + 分词/单字倒排、只读源库、单文件看板、在线查询 API、headless 截图 |
 | [dsh-idea-log](plugins/dsh-idea-log) | 干活时随手记插件点子 / 踩坑 / 改进点，每天半夜自动从会话里提炼，侧栏一面墙，点「开工」直接开新对话 | 多帧 zstd 解压、模型提炼去重、postMessage + `uiWorkspace.startSession` |
-| [dsh-fish-paint](plugins/dsh-fish-paint) | 一句自然语言 → 本机 SDXL 出二次元插画 / 表情包（点名角色先查 P 站对齐设定），落盘存元数据，要的话直接发 QQ | diffusers 常驻 worker、双模型（Illustrious-XL-v2.0 / WAI-NSFW）、rating sidecar 硬闸、一人 1 小时限流（VIP 不限）、qq-bridge 投递 |
+| [dsh-fish-paint](plugins/dsh-fish-paint) | 一句自然语言 → 本机 SDXL 出二次元插画 / 表情包（点名角色先查 P 站对齐设定），落盘存元数据，要的话直接发 QQ | diffusers 常驻 worker、双模型（Illustrious-XL-v2.0 / WAI-NSFW）、rating sidecar 硬闸、一人 1 小时限流（VIP 不限）、qq-bridge 投递、GPU 令牌 |
+| [dsh-floatball](plugins/dsh-floatball) | 桌面常驻一颗球：点开就是点歌 / 画画的监视与控制台，球挂在上层随时能掐歌、中止在画的那张、看显卡被谁占着 | Electron helper（自带运行时、透明置顶窗口、跨屏拖动按光标跟手）、本机 HTTP 控制口 + token、父进程探活 |
+| [dsh-gpu-queue](plugins/dsh-gpu-queue) | 画画 / 唱歌 / 语音合成共用一块显卡：一次只放一个上卡，轮到唱歌先把画画的 worker 让出去 | 单通道 FIFO、心跳与进程探活回收、让位握手（`/paint/yield`）、本机 token 鉴权 |
 | [mcp/pixiv-duty](mcp/pixiv-duty) | Pixiv App API 的 MCP：搜索 / 详情 / 下载 / 小说分段 / 校验 | pixivpy、FastMCP |
 | [mcp/bili-duty](mcp/bili-duty) | B 站 MCP 的加固分支：30 个工具，登录 / 搜索 / 评论 / 字幕 / 私信 / 投稿 | bilibili-api-python |
 
-十一个项目、51 个测试文件（44 个 `*.test.mjs` + 2 个 python 测试 + 5 个测试辅助脚本）。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
+十三个项目、64 个测试文件（56 个 `*.test.mjs` + 3 个 python 测试 + 5 个测试辅助脚本）。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
 
 > `dsh-llm-refusal-fix`（拒答 / 终止原因补丁）已迁移到独立仓库：<https://github.com/3438278672-ops/dsh-llm-refusal-fix>，本仓库不再保留副本。
 
@@ -142,7 +144,9 @@ SDXL 整卡加载需要约 8.2GB，而 8G 卡上桌面常年占着 1.6-2GB。第
 | 插件目录 | 检索 6900+ 个 DSH 插件，标注本机已装状态 |
 | 群聊档案 | 3 万条历史约 7 秒建完索引；中文检索 4 级降级；看板单文件、红线每人最多两根 |
 | 灵感账本 | 每天 23:30 自动提炼一轮；24 小时同名去重；「开工」只预填不自动发送 |
-| 鱼鱼画画 | Illustrious-XL-v2.0（6.6GB）；RTX 3070 8G 上 512² 12-19s / 1024² 37-58s / 1216×832 52s；一人 1 小时一次（VIP 不限）；52 个单测 |
+| 鱼鱼画画 | Illustrious-XL-v2.0（6.6GB）；RTX 3070 8G 上 512² 12-19s / 1024² 37-58s / 1216×832 52s；一人 1 小时一次（VIP 不限）；74 个单测 |
+| 悬浮球 | 96×96 的球 + 392×572 的面板；Electron 44.0.0 运行时约 250MB；展开后一次拿全点歌/画画/显卡三份快照 |
+| 显卡队列 | 一次只发一个令牌；持有者 60 秒没心跳就回收；画画最多排队等 10 分钟 |
 | 拒答补丁 | vendor 1 份 Messages adapter；9 个离线 fixture + 7 条真机冒烟；provider 路由名、设置命名空间都不变 |
 
 ---
@@ -189,6 +193,7 @@ python -m venv .venv
 ```
 dsh-lab/
 ├─ CHANGELOG.md           # 更新说明（按日期，最新在上）
+├─ docs/                  # 设计文档（specs/ 下一份一份的实现前设计）
 ├─ plugins/
 │  ├─ dsh-qq-sing/        # 点歌翻唱（index/worker/queue/cooldown + python 管线 + 8 个测试）
 │  ├─ dsh-coser-fish/     # 以图找人（引擎内核 + 插件层 + 上游 CLI）
@@ -197,7 +202,9 @@ dsh-lab/
 │  ├─ dsh-adb-phone/      # adb 手机控制
 │  ├─ dsh-qq-archive/     # 群聊档案馆（搜索内核 + 档案 + 日报/周报 + 看板 + 问答/日历/资源库 + 熟人卡）
 │  ├─ dsh-idea-log/       # 灵感账本（随手记 + 每日提炼 + 灵感墙 + 一键开工）
-│  └─ dsh-fish-paint/     # 鱼鱼画画（diffusers 常驻 worker + 出图落盘 + QQ 投递）
+│  ├─ dsh-fish-paint/     # 鱼鱼画画（diffusers 常驻 worker + 出图落盘 + QQ 投递 + 控制口）
+│  ├─ dsh-gpu-queue/      # 显卡令牌服务（画画/唱歌/语音共用一个 8G 显存）
+│  └─ dsh-floatball/      # 桌面悬浮球（Electron helper + 点歌/画画控制台）
 └─ mcp/
    ├─ pixiv-duty/         # Pixiv MCP（px_* 7 个工具）
    └─ bili-duty/          # B 站 MCP（bili_* 30 个工具）

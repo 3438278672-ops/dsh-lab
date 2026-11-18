@@ -22,9 +22,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
-import { checkCooldown, clearCooldown, formatLeft, markCooldown, parseRequester, readAllowlist, readCooldowns } from './cooldown.mjs'
+import { checkCooldown, clearCooldown, formatLeft, markCooldown, parseRequester, readAllowlist, readCooldowns, remainingMs } from './cooldown.mjs'
 import { QUEUE_LIMIT, clearQueue, enqueue, readQueue, shiftQueue, unshiftQueue } from './queue.mjs'
 import { resolveNames } from './names.mjs'
+import { ensureToken, resolveServicesDir, tokenPath, tokensMatch, writeStatus } from './services.mjs'
 
 export const name = 'dsh-qq-sing'
 export const inject = ['tools']
@@ -69,6 +70,8 @@ const DEFAULTS = {
   cooldownBypassUids: [],
   // 悬浮球排队卡片读数据的本机端口（dsh-orb 的悬浮球页面轮询 /qqsing.json）
   queuePort: 31877,
+  // 本机服务令牌目录（和 dsh-gpu-queue / dsh-fish-paint 共用一套约定）
+  servicesDir: '',
 }
 
 function textResult(value) {
@@ -114,6 +117,7 @@ function mergeConfig(config) {
   }
   if (raw.announce === false) out.announce = false
   if (raw.exposePaths === true) out.exposePaths = true
+  out.servicesDir = resolveServicesDir(out.servicesDir)
   return out
 }
 
@@ -354,19 +358,189 @@ async function dropQueueWithRefund(cfg) {
 const QUEUE_CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'content-type',
+  'access-control-allow-headers': 'content-type, x-control-token, x-control-by',
 }
 
 /**
- * 悬浮球排队卡片的数据源：本机只读 HTTP 端口。
- * dsh-orb 的悬浮球页面（file:// 页面）用 fetch 轮询 GET /qqsing.json。
- * POST /qqsing/pause?on=1|0 是那页卡片上的暂停键——只接受本机页面（file:// 的 Origin 是 null）
- * 和本机程序；浏览器里别的网站带 Origin 过来会被拒，防止随手一个网页就能把点歌停掉。
+ * 掐掉正在唱的那首——工具和悬浮球面板共用这一套逻辑。
+ * 默认只掐当前这一首，排单照常；alsoQueue=true 连排单一起清并逐条退 CD。
+ * 返回体给面板看，summary 给人看。
+ */
+async function cancelCurrent(cfg, { jobId: wantedJobId = '', alsoQueue = false, by = 'qq_sing_cancel' } = {}) {
+  const state = await readJson(statePath(cfg))
+  const queued = await readQueue(cfg.home).catch(() => [])
+  if (!state?.jobId) {
+    return {
+      ok: true,
+      cancelled: false,
+      clearedQueue: 0,
+      by,
+      summary: `🎤 现在没有正在唱的歌，不用取消。${queued.length ? `排单里还有 ${queued.length} 首在等。` : ''}`,
+    }
+  }
+  if (wantedJobId && String(wantedJobId) !== String(state.jobId)) {
+    return {
+      ok: false,
+      cancelled: false,
+      code: 'JOB_MISMATCH',
+      jobId: String(state.jobId),
+      by,
+      message: `当前任务是 ${state.jobId}，不是 ${wantedJobId}；没动它，先用 qq_sing_status 看一眼。`,
+    }
+  }
+
+  const jobId = String(state.jobId)
+  const song = state.song ? `《${state.song}》` : '这一首'
+  const total = Number(state.total) || 0
+  const sent = Number(state.sent) || 0
+  const progress = total ? `，已发 ${sent}/${total} 段` : ''
+  const base = { jobId, song: state.song || '', sent, total, by }
+
+  const patchState = async (patch) => {
+    const next = { ...state, ...patch, updatedAt: Date.now() }
+    await writeFile(statePath(cfg), JSON.stringify(next, null, 2), 'utf8').catch(() => {})
+  }
+
+  // 只有一段都没发出去才算「没点过」；发过几段就退 CD 会让同一首被从第 1 段重听一遍
+  const refundCooldown = async () => {
+    if (sent > 0) return false
+    const jobCfg = await readJson(join(cfg.home, 'jobs', jobId, 'job.json'))
+    // job.json 可能已经被清掉（job 目录被删/磁盘收拾过），state.json 里也存了 requester
+    return refundCooldownIfUnsent(cfg, {
+      requester: jobCfg?.requester ?? state.requester,
+      song: state.song,
+      whitelisted: Boolean(jobCfg?.whitelisted ?? state.whitelisted),
+      sent,
+    })
+  }
+
+  // 默认只掐当前这首，排队的人继续等（以前这里无条件清空全队，等于把别人点的歌一起弄丢）
+  const dropInfo = alsoQueue ? await dropQueueWithRefund(cfg) : { dropped: 0, refunded: 0 }
+  const left = (await readQueue(cfg.home).catch(() => [])).length
+  const queueNote = dropInfo.dropped
+    ? `，排单里 ${dropInfo.dropped} 首也清了${dropInfo.refunded ? `（退了 ${dropInfo.refunded} 人的 CD）` : ''}`
+    : left
+      ? `，排单里还有 ${left} 首，照常唱`
+      : ''
+  const clearedQueue = dropInfo.dropped
+
+  // 已经结束过：只可能残留锁
+  if (state.finishedAt) {
+    await releaseLock(cfg, jobId)
+    return {
+      ...base,
+      ok: true,
+      cancelled: false,
+      clearedQueue,
+      summary: `🎤 ${song}已经结束了${progress}，顺手清掉了残留的锁${queueNote}。`,
+    }
+  }
+
+  // 进程已经没了：上次崩掉，锁也快过期了，这里直接收尾
+  if (!pidAlive(state.pid)) {
+    await patchState({ stage: 'error', stageText: '进程已消失', ok: false, error: 'worker 进程不在了（可能崩了或被系统杀了）', finishedAt: Date.now() })
+    await releaseLock(cfg, jobId)
+    const cdRefunded = await refundCooldown()
+    return {
+      ...base,
+      ok: true,
+      cancelled: false,
+      cdRefunded,
+      clearedQueue,
+      summary: `🎤 ${song}的 worker 已经不在了${progress}，已经清掉状态和锁${cdRefunded ? '，并退还了点歌 CD' : ''}。现在可以重新点歌${queueNote}。`,
+    }
+  }
+
+  // PID 活着的未必是我们的 worker（Windows 会复用 PID），杀掉之前核对命令行
+  const cmdline = await pidCommandLine(state.pid)
+  if (!cmdline || !/worker\.mjs/i.test(cmdline)) {
+    await patchState({
+      stage: 'error',
+      stageText: '进程对不上',
+      ok: false,
+      error: `PID ${state.pid} 现在不是点歌 worker（命令行：${cmdline.slice(0, 120) || '取不到'}）`,
+      finishedAt: Date.now(),
+    })
+    await releaseLock(cfg, jobId)
+    const cdRefunded = await refundCooldown()
+    return {
+      ...base,
+      ok: true,
+      cancelled: false,
+      cdRefunded,
+      clearedQueue,
+      summary: `🎤 ${song}的 worker 进程看起来已经没了（PID ${state.pid} 已经被别的程序占了），所以没杀任何东西，只清掉了状态和锁${cdRefunded ? '，并退还了 CD' : ''}${queueNote}。`,
+    }
+  }
+
+  const killed = await killProcessTree(state.pid)
+  await patchState({
+    stage: 'cancelled',
+    stageText: '被取消了',
+    ok: false,
+    error: '手动取消',
+    finishedAt: Date.now(),
+  })
+  await releaseLock(cfg, jobId)
+  const cdRefunded = await refundCooldown()
+  return {
+    ...base,
+    ok: true,
+    cancelled: true,
+    cdRefunded,
+    clearedQueue,
+    summary: killed
+      ? `🛑 ${song}已取消${progress}${cdRefunded ? '，点歌 CD 也退回去了' : sent > 0 ? '，已经发出去的那几段就留着' : ''}。现在可以重新点歌${queueNote}。`
+      : `🛑 状态已经清了，但 taskkill 没成功（PID ${state.pid} 可能已经先一步退出）。用 qq_sing_status 确认一下${queueNote}。`,
+  }
+}
+
+/**
+ * 悬浮球 / 面板的数据源与控制口：本机 HTTP 端口（默认 31877）。
+ *   GET  /qqsing.json            在有唱/排单/限流/暂停状态，悬浮球轮询它
+ *   POST /qqsing/pause?on=1|0    暂停接新点歌（在唱的那首照常唱完）
+ *   POST /qqsing/cancel?alsoQueue=0|1   掐掉正在唱的（要令牌）
+ * 写端点认两种身份：带着 ~/.dsh/dsh-services/qq-sing.token 的 X-Control-Token，
+ * 或者本机 file:// 页面（Origin 是 null / 空）。别的网站带 Origin 过来一律 403。
  */
 function startQueueServer(cfg) {
   const port = Number(cfg.queuePort)
   // 0 / 负数 = 不开这个端口（测试和「不装悬浮球」的人跑起来不会莫名占着 31877）
   if (!Number.isFinite(port) || port <= 0) return () => {}
+  const servicesDir = cfg.servicesDir || resolveServicesDir('')
+  const startedAt = Date.now()
+  let controlToken = ''
+  try {
+    controlToken = ensureToken(servicesDir, 'qq-sing')
+  } catch {
+    // 令牌写不进去就只认本机页面（file://），tokenOk 会一直 false
+  }
+  const writeStatusNow = (extra = {}) =>
+    writeStatus(servicesDir, 'qq-sing', {
+      service: 'qq-sing',
+      port,
+      pid: process.pid,
+      startedAt,
+      updatedAt: Date.now(),
+      tokenFile: tokenPath(servicesDir, 'qq-sing'),
+      ...extra,
+    })
+  const tokenOk = (req) => tokensMatch(controlToken, req.headers['x-control-token'])
+  const localOrigin = (req) => {
+    const origin = String(req.headers.origin || '')
+    return origin === '' || origin === 'null' || origin === `http://127.0.0.1:${port}`
+  }
+  // HTTP 头只能是 latin1：中文名字要 encodeURIComponent 传，这里解回来（?by= 也认，方便 curl 调试）
+  const readBy = (req, url) => {
+    const raw = String(req.headers['x-control-by'] || url?.searchParams?.get('by') || '')
+    let decoded = raw
+    try {
+      decoded = decodeURIComponent(raw)
+    } catch {
+      decoded = raw
+    }
+    return decoded.replace(/[\r\n\t]/g, ' ').trim().slice(0, 40) || '悬浮球'
+  }
   const server = createServer(async (req, res) => {
     try {
       if (req.method === 'OPTIONS') {
@@ -380,18 +554,35 @@ function startQueueServer(cfg) {
           res.writeHead(405, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('method not allowed')
           return
         }
-        const origin = String(req.headers.origin || '')
-        const localOrigin = origin === '' || origin === 'null' || origin === `http://127.0.0.1:${port}`
-        if (!localOrigin) {
+        if (!tokenOk(req) && !localOrigin(req)) {
           res.writeHead(403, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('forbidden origin')
           return
         }
         const raw = String(url.searchParams.get('on') ?? '1').toLowerCase()
         const on = ['1', 'true', 'on', 'yes'].includes(raw)
-        const next = await writePaused(cfg, on, 'orb')
+        const next = await writePaused(cfg, on, readBy(req, url))
         res
           .writeHead(200, { ...QUEUE_CORS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-          .end(JSON.stringify({ ok: true, paused: next.paused, now: Date.now() }))
+          .end(JSON.stringify({ ok: true, paused: next.paused, updatedAt: next.updatedAt, updatedBy: next.updatedBy, now: Date.now() }))
+        return
+      }
+      if (pathname === '/qqsing/cancel') {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('method not allowed')
+          return
+        }
+        // 掐歌比暂停狠：只认令牌（悬浮球带 ~/.dsh/dsh-services/qq-sing.token）
+        if (!tokenOk(req)) {
+          res.writeHead(403, { ...QUEUE_CORS, 'content-type': 'text/plain; charset=utf-8' }).end('forbidden: need x-control-token')
+          return
+        }
+        const alsoQueue = ['1', 'true', 'on', 'yes'].includes(String(url.searchParams.get('alsoQueue') ?? '').toLowerCase())
+        const wanted = String(url.searchParams.get('jobId') ?? '').trim()
+        const result = await cancelCurrent(cfg, { jobId: wanted, alsoQueue, by: readBy(req, url) })
+        const status = result.code === 'JOB_MISMATCH' ? 409 : 200
+        res
+          .writeHead(status, { ...QUEUE_CORS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          .end(JSON.stringify({ ...result, now: Date.now() }))
         return
       }
       if (pathname !== '/qqsing.json') {
@@ -427,16 +618,64 @@ function startQueueServer(cfg) {
         whitelisted: Boolean(item.whitelisted),
         queuedAt: Number(item.queuedAt) || 0,
       }))
+      // 限流状态给面板看：谁还要等多久、白名单几位、CD 多长
+      const cooldownMs = Number(cfg.cooldownMs) || 0
+      const allow = await readAllowlist(cfg.home).catch(() => new Set())
+      const bypass = new Set((Array.isArray(cfg.cooldownBypassUids) ? cfg.cooldownBypassUids : []).map(String))
+      const cdMap = await readCooldowns(cfg.home).catch(() => ({}))
+      const nowMs = Date.now()
+      const cooldowns = []
+      for (const uid of Object.keys(cdMap || {})) {
+        const left = remainingMs(cdMap, uid, nowMs, cooldownMs)
+        // 白名单和 bypass 名单本来就不计时，列出来只会让人误会
+        if (left <= 0 || bypass.has(uid) || allow.has(uid)) continue
+        cooldowns.push({
+          requester: uid,
+          leftMs: left,
+          resetAt: Number(cdMap[uid]?.at || 0) + cooldownMs,
+          song: cdMap[uid]?.song || '',
+          target: cdMap[uid]?.target || '',
+        })
+      }
+      cooldowns.sort((a, b) => b.leftMs - a.leftMs)
+      const limits = {
+        cooldownMs,
+        cooldownMinutes: Math.round(cooldownMs / 60000),
+        bypassCount: bypass.size,
+        allowlistCount: allow.size,
+        maxQueue: Number(cfg.maxQueue) || QUEUE_LIMIT,
+      }
       res
         .writeHead(200, { ...QUEUE_CORS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        .end(JSON.stringify({ ok: true, now: Date.now(), paused: await readPaused(cfg), active, queue, recent }))
+        .end(
+          JSON.stringify({
+            ok: true,
+            now: nowMs,
+            paused: await readPaused(cfg),
+            active,
+            queue,
+            recent,
+            limits,
+            cooldowns: cooldowns.slice(0, 50),
+          }),
+        )
     } catch {
       res.writeHead(500, QUEUE_CORS).end('{}')
     }
   })
-  server.on('error', () => {})
-  server.listen(port, '127.0.0.1')
+  server.on('error', (error) => {
+    // 端口被占时不静默：写进 status 文件，悬浮球分得清「没开」和「起不来」
+    writeStatusNow({ error: { code: error?.code || 'LISTEN_FAILED', message: String(error?.message || error) } })
+  })
+  server.listen(port, '127.0.0.1', () => {
+    writeStatusNow()
+  })
   return () => {
+    try {
+      writeStatusNow({ stoppedAt: Date.now() })
+    } catch {
+      /* 忽略 */
+    }
     try {
       server.close()
     } catch {
@@ -1149,128 +1388,13 @@ export function apply(ctx, config) {
         render: (_args, value) => textResult(value?.summary ?? JSON.stringify(value)),
       },
       async execute(args) {
-        const alsoQueue = args?.alsoQueue === true
-        const state = await readJson(statePath(cfg))
-        if (!state?.jobId) {
-          const left = (await readQueue(cfg.home).catch(() => [])).length
-          return {
-            ok: true,
-            cancelled: false,
-            summary: `🎤 现在没有正在唱的歌，不用取消。${left ? `排单里还有 ${left} 首在等。` : ''}`,
-          }
-        }
-        if (args?.jobId && String(args.jobId) !== String(state.jobId)) {
-          throw new Error(`当前任务是 ${state.jobId}，不是 ${args.jobId}；没动它，先用 qq_sing_status 看一眼。`)
-        }
-        const jobId = String(state.jobId)
-        const song = state.song ? `《${state.song}》` : '这一首'
-        const total = Number(state.total) || 0
-        const sent = Number(state.sent) || 0
-        const progress = total ? `，已发 ${sent}/${total} 段` : ''
-
-        const patchState = async (patch) => {
-          const next = { ...state, ...patch, updatedAt: Date.now() }
-          await writeFile(statePath(cfg), JSON.stringify(next, null, 2), 'utf8').catch(() => {})
-        }
-        // 只有一段都没发出去才算「没点过」；发过几段就退 CD 会让同一首被从第 1 段重听一遍
-        const refundCooldown = async () => {
-          if (sent > 0) return false
-          const jobCfg = await readJson(join(cfg.home, 'jobs', jobId, 'job.json'))
-          // job.json 可能已经被清掉（job 目录被删/磁盘收拾过），state.json 里也存了 requester
-          const requester = jobCfg?.requester ?? state.requester
-          const isWhitelisted = jobCfg?.whitelisted ?? Boolean(state.whitelisted)
-          if (!requester || isWhitelisted) return false
-          try {
-            const map = await readCooldowns(cfg.home)
-            const entry = map?.[String(requester)]
-            if (entry && String(entry.song ?? '') === String(state.song ?? '')) {
-              await clearCooldown(cfg.home, String(requester))
-              return true
-            }
-          } catch {
-            /* CD 文件坏了不影响取消 */
-          }
-          return false
-        }
-
-        // 默认只掐当前这首，排队的人继续等（以前这里无条件清空全队，等于把别人点的歌一起弄丢）
-        const dropInfo = alsoQueue ? await dropQueueWithRefund(cfg) : { dropped: 0, refunded: 0 }
-        const left = (await readQueue(cfg.home).catch(() => [])).length
-        const queueNote = dropInfo.dropped
-          ? `，排单里 ${dropInfo.dropped} 首也清了${dropInfo.refunded ? `（退了 ${dropInfo.refunded} 人的 CD）` : ''}`
-          : left
-            ? `，排单里还有 ${left} 首，照常唱`
-            : ''
-
-        // 已经结束过：只可能残留锁
-        if (state.finishedAt) {
-          await releaseLock(cfg, jobId)
-          return { ok: true, cancelled: false, jobId, song: state.song, sent, total, summary: `🎤 ${song}已经结束了${progress}，顺手清掉了残留的锁${queueNote}。` }
-        }
-
-        // 进程已经没了：上次崩掉，锁也快过期了，这里直接收尾
-        if (!pidAlive(state.pid)) {
-          await patchState({ stage: 'error', stageText: '进程已消失', ok: false, error: 'worker 进程不在了（可能崩了或被系统杀了）', finishedAt: Date.now() })
-          await releaseLock(cfg, jobId)
-          const cdRefunded = await refundCooldown()
-          return {
-            ok: true,
-            cancelled: false,
-            jobId,
-            song: state.song,
-            sent,
-            total,
-            cdRefunded,
-            summary: `🎤 ${song}的 worker 已经不在了${progress}，已经清掉状态和锁${cdRefunded ? '，并退还了点歌 CD' : ''}。现在可以重新点歌${queueNote}。`,
-          }
-        }
-
-        // PID 活着的未必是我们的 worker（Windows 会复用 PID），杀掉之前核对命令行
-        const cmdline = await pidCommandLine(state.pid)
-        if (!cmdline || !/worker\.mjs/i.test(cmdline)) {
-          await patchState({
-            stage: 'error',
-            stageText: '进程对不上',
-            ok: false,
-            error: `PID ${state.pid} 现在不是点歌 worker（命令行：${cmdline.slice(0, 120) || '取不到'}）`,
-            finishedAt: Date.now(),
-          })
-          await releaseLock(cfg, jobId)
-          const cdRefunded = await refundCooldown()
-          return {
-            ok: true,
-            cancelled: false,
-            jobId,
-            song: state.song,
-            sent,
-            total,
-            cdRefunded,
-            summary: `🎤 ${song}的 worker 进程看起来已经没了（PID ${state.pid} 已经被别的程序占了），所以没杀任何东西，只清掉了状态和锁${cdRefunded ? '，并退还了 CD' : ''}${queueNote}。`,
-          }
-        }
-
-        const killed = await killProcessTree(state.pid)
-        await patchState({
-          stage: 'cancelled',
-          stageText: '被取消了',
-          ok: false,
-          error: '手动取消',
-          finishedAt: Date.now(),
+        const result = await cancelCurrent(cfg, {
+          jobId: args?.jobId ? String(args.jobId) : '',
+          alsoQueue: args?.alsoQueue === true,
+          by: 'qq_sing_cancel',
         })
-        await releaseLock(cfg, jobId)
-        const cdRefunded = await refundCooldown()
-        return {
-          ok: true,
-          cancelled: true,
-          jobId,
-          song: state.song,
-          sent,
-          total,
-          cdRefunded,
-          summary: killed
-            ? `🛑 ${song}已取消${progress}${cdRefunded ? '，点歌 CD 也退回去了' : sent > 0 ? '，已经发出去的那几段就留着' : ''}。现在可以重新点歌${queueNote}。`
-            : `🛑 状态已经清了，但 taskkill 没成功（PID ${state.pid} 可能已经先一步退出）。用 qq_sing_status 确认一下${queueNote}。`,
-        }
+        if (result.code === 'JOB_MISMATCH') throw new Error(result.message)
+        return result
       },
     }),
   )

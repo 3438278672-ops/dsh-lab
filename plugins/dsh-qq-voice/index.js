@@ -20,6 +20,7 @@ import { connect } from 'node:net'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
+import { withVoiceToken } from './gpu-token.mjs'
 
 export const name = 'dsh-qq-voice'
 export const inject = ['tools']
@@ -56,6 +57,11 @@ const DEFAULTS = {
   // 出错时是否在工具报错里带上 wav 的绝对路径。默认 false：QQ 会话里模型可能把它念/贴出来，
   // 绝对路径属于本地信息。只有管理员自己排查时再打开。
   exposePaths: false,
+  // 和画图/翻唱共用一张显卡：TTS 前领一张 voice 令牌（dsh-gpu-queue）
+  gpuQueueUrl: '',
+  gpuQueueWaitMs: 30000,
+  gpuQueuePollMs: 500,
+  servicesDir: '',
 }
 
 function textResult(value) {
@@ -199,13 +205,17 @@ async function renderSpeech(cfg, content) {
   argv.push('--', content)
   let stdout = ''
   try {
-    const result = await execFileP(cfg.pythonPath, [cfg.ttsScript, ...argv], {
-      timeout: cfg.timeoutMs,
-      maxBuffer: MAX_BUFFER,
-      windowsHide: true,
-    })
+    // TTS 也要吃显存：先排队领 voice 令牌，避免边画图边念语音把 8G 显存打爆
+    const result = await withVoiceToken(cfg, 'QQ 语音', () =>
+      execFileP(cfg.pythonPath, [cfg.ttsScript, ...argv], {
+        timeout: cfg.timeoutMs,
+        maxBuffer: MAX_BUFFER,
+        windowsHide: true,
+      }),
+    )
     stdout = result.stdout
   } catch (error) {
+    if (error?.name === 'VoiceQueueBusy') throw error
     if (error?.killed === true || error?.signal) {
       throw new Error(`语音合成超时（${Math.round(cfg.timeoutMs / 1000)}s 没出结果），请缩短文本再试。`)
     }

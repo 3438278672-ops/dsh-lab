@@ -170,3 +170,29 @@ export function cooldownStatus({ file, requester, windowMs, max = 1, now = Date.
     resetAt,
   }
 }
+
+/**
+ * 只读查询：现在还在冷却里的人（面板「限流状态」用）。
+ * 按剩余时间从长到短排，只列真的还要等的。
+ */
+export function listCooldowns({ file, windowMs, max = 1, now = Date.now() }) {
+  const window = Number(windowMs)
+  if (!(window > 0)) return []
+  const limit = Math.max(1, Math.trunc(Number(max) || 1))
+  const state = readDrawState(file)
+  const out = []
+  for (const [qq, entry] of Object.entries(state.entries || {})) {
+    const hits = hitsOf(entry, now, window)
+    if (hits.length < limit) continue
+    const resetAt = Math.min(...hits) + window
+    out.push({
+      requester: qq,
+      used: hits.length,
+      limit,
+      resetAt,
+      retryAfterSec: Math.max(1, Math.ceil((resetAt - now) / 1000)),
+    })
+  }
+  out.sort((a, b) => b.retryAfterSec - a.retryAfterSec)
+  return out
+}

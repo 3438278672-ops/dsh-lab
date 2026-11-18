@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:31877 http://127.0.0.1:31878 http://127.0.0.1:31879" />
+    <title>大肥鱼悬浮球</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div id="ball" title="点歌 / 画画">
+      <div class="ball-face">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <defs>
+            <linearGradient id="whale" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#6fb6ff" />
+              <stop offset="60%" stop-color="#3f7bff" />
+              <stop offset="100%" stop-color="#2a49c8" />
+            </linearGradient>
+          </defs>
+          <circle cx="32" cy="32" r="30" fill="url(#whale)" />
+          <path d="M18 34c0-8 6-14 14-14s14 6 14 14c0 5-3 9-7 11 1-3 0-6-2-8-2 3-6 4-9 3-2 3-6 4-9 2 2-2 3-4 3-7-2 0-4-1-4-3z" fill="#eaf4ff" opacity="0.92" />
+          <circle cx="40" cy="30" r="2.2" fill="#1b2b63" />
+          <path d="M46 20c3-3 7-3 9 0-3 0-6 2-7 5-1-2-2-4-2-5z" fill="#eaf4ff" opacity="0.9" />
+        </svg>
+      </div>
+      <span id="dot" class="dot"></span>
+    </div>
+
+    <section id="panel" hidden>
+      <header class="panel-head">
+        <div class="title">
+          <strong>大肥鱼</strong>
+          <span class="sub">点歌 / 画画</span>
+        </div>
+        <div class="head-actions">
+          <button id="btnQuit" class="icon" title="关掉悬浮球">×</button>
+          <button id="btnCollapse" class="icon" title="收起">—</button>
+        </div>
+      </header>
+
+      <div id="gpuStrip" class="strip" data-open="0">
+        <button id="gpuToggle" class="strip-head">
+          <span class="strip-label">显卡队列</span>
+          <span id="gpuHolder" class="strip-value">查不到</span>
+          <span id="gpuWaiting" class="badge">—</span>
+        </button>
+        <div id="gpuBody" class="strip-body" hidden></div>
+      </div>
+
+      <nav class="tabs">
+        <button id="tabSing" class="tab" data-active="1">点歌</button>
+        <button id="tabPaint" class="tab" data-active="0">画画</button>
+      </nav>
+
+      <div id="paneSing" class="pane">
+        <div class="row-line">
+          <button id="btnSingPause" class="pill">暂停接新单</button>
+          <button id="btnSingCancel" class="pill danger">掐掉这首</button>
+        </div>
+        <div class="row-line">
+          <span id="singLimits" class="muted">—</span>
+        </div>
+        <div class="card">
+          <div class="card-title">在唱</div>
+          <div id="singActive" class="card-body muted">空闲</div>
+        </div>
+        <div class="card">
+          <div class="card-title">排单</div>
+          <ul id="singQueue" class="list"></ul>
+        </div>
+        <div class="card">
+          <div class="card-title">冷却中</div>
+          <ul id="singCooldowns" class="list"></ul>
+        </div>
+        <div class="card">
+          <div class="card-title">刚唱完</div>
+          <ul id="singRecent" class="list"></ul>
+        </div>
+      </div>
+
+      <div id="panePaint" class="pane" hidden>
+        <div class="row-line">
+          <button id="btnPaintPause" class="pill">暂停接新图</button>
+          <button id="btnPaintAbort" class="pill danger">中止这张</button>
+        </div>
+        <div class="card">
+          <div class="card-title">worker</div>
+          <div id="paintWorker" class="card-body muted">查不到</div>
+        </div>
+        <div class="card">
+          <div class="card-title">在飞</div>
+          <ul id="paintFlight" class="list"></ul>
+        </div>
+        <div class="card">
+          <div class="card-title">冷却中</div>
+          <ul id="paintCooldowns" class="list"></ul>
+        </div>
+      </div>
+
+      <footer class="panel-foot">
+        <span id="health" class="health">连接中…</span>
+        <span id="toast" class="toast"></span>
+      </footer>
+    </section>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

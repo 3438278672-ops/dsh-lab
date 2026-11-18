@@ -1,0 +1,6 @@
+# dsh-gpu-queue：一张显卡的发牌员
+# 配置项见 index.js 顶部 DEFAULTS；默认 127.0.0.1:31879，令牌在 ~/.dsh/dsh-services/gpu-queue.token
+- insert:
+    - id: gpu-queue
+      name: dsh-gpu-queue
+      config: {}

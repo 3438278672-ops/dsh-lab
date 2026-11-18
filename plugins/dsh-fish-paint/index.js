@@ -8,11 +8,17 @@
 //            → lib/presets.js（画风预设/质量词/参数归一）
 //            → lib/store.js（PNG 落盘 + 元数据 + rating sidecar + index.jsonl）
 //            → lib/qq.js（QQ 投递 + bridge r18-guard 硬闸）
+//            → lib/gpu.js（GPU 队列客户端：和唱歌抢同一张卡的排队令牌）
+//            → lib/control.js（本机控制口 127.0.0.1:31878，悬浮球面板用）
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createActivity } from './lib/activity.js'
+import { startControlServer } from './lib/control.js'
 import { createEngine } from './lib/engine.js'
+import { createGpuClient } from './lib/gpu.js'
+import { createPauseStore } from './lib/pause.js'
 import { PRESET_NAMES, buildArgs, presetSummary } from './lib/presets.js'
 import { ensureDirs, listRecent, recordImage, todayDir } from './lib/store.js'
 import { bridgeStatus, resolveBridgeDir, resolveFfmpeg, sendImages } from './lib/qq.js'
@@ -21,11 +27,13 @@ import {
   DEFAULT_COOLDOWN_MINUTES,
   DEFAULT_VIP_LIST,
   isVip,
+  listCooldowns,
   normalizeRequester,
   parseVipList,
   releaseDraw,
   reserveDraw,
 } from './lib/ratelimit.js'
+import { resolveServicesDir } from './lib/services.js'
 
 export const name = 'dsh-fish-paint'
 export const inject = ['tools', 'systemPrompt']
@@ -39,6 +47,14 @@ const DEFAULTS = {
   steps: 28,
   cfg: 5.5,
   vramMode: 'auto',
+  // 本机控制口（悬浮球面板）：31878；设 0 就不开服务（单测用）。
+  controlPort: 31878,
+  controlBind: '127.0.0.1',
+  // GPU 队列（dsh-gpu-queue）：画画和唱歌共用一张卡，排队拿令牌；连不上就明确失败。
+  gpuQueueUrl: 'http://127.0.0.1:31879',
+  gpuQueueWaitMinutes: 10,
+  gpuQueuePollMs: 1000,
+  gpuQueueHeartbeatMs: 15000,
   // 限流：一个人 60 分钟只能请求画一次；vip 名单里的号不限。
   drawCooldownMinutes: DEFAULT_COOLDOWN_MINUTES,
   drawCooldownMax: DEFAULT_COOLDOWN_MAX,
@@ -69,8 +85,38 @@ export function apply(ctx, config) {
     vramMode: cfg.vramMode,
   })
 
+  // 运行时共享件：暂停开关（全局，悬浮球上按）、在飞请求、GPU 队列客户端、中止标记。
+  const runtime = {
+    paused: createPauseStore(path.join(cfg.dataDir, 'state', 'paint-paused.json')),
+    activity: createActivity(),
+    gpu: createGpuClient(cfg),
+    abortState: { at: 0 },
+    log: (message) => console.warn(`[fish-paint] ${message}`),
+  }
+
   // 插件卸载 / DSH 退出时杀掉 worker，别留孤儿进程。
   ctx.effect(() => () => engine.dispose())
+
+  // 悬浮球面板的控制口；关掉（0）时什么都不起，单测也不会占端口。
+  if (cfg.controlPort > 0) {
+    ctx.effect(() => {
+      let control = null
+      try {
+        control = startControlServer(cfg, {
+          engine,
+          pauseStore: runtime.paused,
+          activity: runtime.activity,
+          gpu: runtime.gpu,
+          abortState: runtime.abortState,
+          log: runtime.log,
+        })
+      } catch (error) {
+        console.warn(`[fish-paint] 控制口起不来：${error.message}`)
+        return () => {}
+      }
+      return () => control.dispose()
+    })
+  }
 
   ctx.effect(() =>
     ctx.systemPrompt.section({
@@ -80,9 +126,9 @@ export function apply(ctx, config) {
     }),
   )
 
-  registerDrawImage(ctx, cfg, engine)
-  registerDrawStatus(ctx, cfg, engine)
-  registerDrawSetup(ctx, cfg, engine)
+  registerDrawImage(ctx, cfg, engine, runtime)
+  registerDrawStatus(ctx, cfg, engine, runtime)
+  registerDrawSetup(ctx, cfg, engine, runtime)
   registerDrawRecent(ctx, cfg)
 }
 
@@ -114,6 +160,16 @@ function mergeConfig(input) {
     steps: integerIn(pick('steps'), 4, 80, DEFAULTS.steps),
     cfg: numberIn(pick('cfg'), 1, 20, DEFAULTS.cfg),
     vramMode: ['auto', 'full', 'offload'].includes(pick('vramMode')) ? pick('vramMode') : DEFAULTS.vramMode,
+    // 控制口：0 = 不开（单测/不想让面板连时用）。bind 只允许本机回环。
+    controlPort: integerIn(pick('controlPort'), 0, 65535, DEFAULTS.controlPort),
+    controlBind: pick('controlBind') === '0.0.0.0' ? '0.0.0.0' : DEFAULTS.controlBind,
+    // 令牌/状态文件目录（和 dsh-gpu-queue 共用约定）。
+    servicesDir: resolveServicesDir(pick('servicesDir')),
+    // GPU 队列：连不上时画画会明确报 QUEUE_UNAVAILABLE，不静默放行。
+    gpuQueueUrl: typeof pick('gpuQueueUrl') === 'string' ? pick('gpuQueueUrl').trim() : DEFAULTS.gpuQueueUrl,
+    gpuQueueWaitMinutes: numberIn(pick('gpuQueueWaitMinutes'), 1, 60, DEFAULTS.gpuQueueWaitMinutes),
+    gpuQueuePollMs: integerIn(pick('gpuQueuePollMs'), 100, 10000, DEFAULTS.gpuQueuePollMs),
+    gpuQueueHeartbeatMs: integerIn(pick('gpuQueueHeartbeatMs'), 500, 60000, DEFAULTS.gpuQueueHeartbeatMs),
     // 限流：0 = 关闭；vipList 支持数组或 "1,2 3" 字符串，默认 2220222310。
     drawCooldownMinutes: numberIn(pick('drawCooldownMinutes'), 0, 1440, DEFAULTS.drawCooldownMinutes),
     drawCooldownMax: integerIn(pick('drawCooldownMax'), 1, 10, DEFAULTS.drawCooldownMax),
@@ -225,7 +281,7 @@ export function pickModelKey(cfg, requested, rating) {
 
 // ── draw_image ─────────────────────────────────────────────────────────
 
-function registerDrawImage(ctx, cfg, engine) {
+function registerDrawImage(ctx, cfg, engine, runtime) {
   return ctx.effect(() =>
     ctx.tools.register({
       name: 'draw_image',
@@ -284,13 +340,13 @@ function registerDrawImage(ctx, cfg, engine) {
       timeoutMs: 600_000,
       output: JSON_OUTPUT,
       async execute(args = {}) {
-        return executeDrawImage(cfg, engine, args)
+        return executeDrawImage(cfg, engine, args, runtime)
       },
     }),
   )
 }
 
-async function executeDrawImage(cfg, engine, args) {
+async function executeDrawImage(cfg, engine, args, runtime) {
   const rawPrompt = typeof args.prompt === 'string' ? args.prompt.trim() : ''
   if (!rawPrompt) {
     return failure({
@@ -300,6 +356,10 @@ async function executeDrawImage(cfg, engine, args) {
   }
   const targetCheck = normalizeTarget(args.target)
   if (targetCheck.error) return failure({ code: 'BAD_REQUEST', message: targetCheck.error })
+
+  // 全局暂停（悬浮球上的开关，2026-11-18 用户拍板）：主会话也一样拦，没有 bypass。
+  const pause = runtime.paused.read()
+  if (pause.paused) return pausedFailure(pause)
 
   const rating = args.rating === 'nsfw' ? 'nsfw' : 'sfw'
   const modelKey = pickModelKey(cfg, args.model, rating)
@@ -322,10 +382,30 @@ async function executeDrawImage(cfg, engine, args) {
   const rate = beginRateLimit(cfg, requester)
   if (rate.blocked) return rate.blocked
 
+  // 排队等 GPU：唱歌在翻唱时这张卡是它的，画图先拿令牌再动显存。
+  const jobId = runtime.activity.begin({ prompt: rawPrompt, requester, rating, note: args.note })
+  let ticket = null
   let payload
   try {
-    payload = await runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args, modelKey })
+    ticket = await runtime.gpu.acquire({
+      kind: 'draw',
+      label: `${built.preset} ${built.width}×${built.height}`,
+      waitMs: cfg.gpuQueueWaitMinutes * 60_000,
+      onWaiting: (position) => runtime.activity.mark(jobId, { phase: 'queued', position }),
+    })
+    runtime.activity.mark(jobId, { phase: 'drawing', position: 0 })
+    payload = await runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args, modelKey, runtime })
+  } catch (error) {
+    payload = failure(mapAbortError(error, runtime), {
+      prompt: shorten(rawPrompt),
+      preset: built.preset,
+      rating,
+      model: modelKey,
+      summaryPrefix: '这次没画成',
+    })
   } finally {
+    if (ticket) await ticket.release()
+    runtime.activity.end(jobId)
     // 生成失败就把名额退回去，别让人因为一次 OOM 白等一小时。
     if (payload?.ok !== true && rate.release) rate.release()
   }
@@ -333,7 +413,34 @@ async function executeDrawImage(cfg, engine, args) {
   return payload
 }
 
-async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args, modelKey }) {
+/** 暂停时的统一回话：告诉模型「停着」，别换工具硬画。 */
+function pausedFailure(pause) {
+  const by = pause.updatedBy ? `（${pause.updatedBy} 停的）` : ''
+  return failure(
+    {
+      code: 'PAUSED',
+      message: `画画现在被暂停了${by}，不再接新的点图；在画的那张会画完。`,
+    },
+    { summaryPrefix: '画画暂停中' },
+  )
+}
+
+/**
+ * 中止 / 让位把 worker 杀了之后，在飞的 generate 会以 WORKER_EXIT 失败。
+ * 面板刚按过中止（15 秒内）就把它翻成 ABORTED，否则模型会以为是引擎崩了。
+ */
+function mapAbortError(error, runtime) {
+  const at = Number(runtime?.abortState?.at) || 0
+  if (at && Date.now() - at < 15_000) {
+    return {
+      code: 'ABORTED',
+      message: '这张图被面板中止了（常驻 worker 已停掉释放显存）。要接着画直接再调 draw_image。',
+    }
+  }
+  return error
+}
+
+async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, targetCheck, args, modelKey, runtime }) {
   const startedAt = Date.now()
   let done
   let outDir
@@ -354,7 +461,12 @@ async function runDrawGeneration(cfg, engine, { built, rawPrompt, rating, target
       model: modelKey,
     })
   } catch (error) {
-    return failure(error, { prompt: shorten(rawPrompt), preset: built.preset, rating, model: modelKey })
+    return failure(mapAbortError(error, runtime), {
+      prompt: shorten(rawPrompt),
+      preset: built.preset,
+      rating,
+      model: modelKey,
+    })
   }
 
   const elapsedSec = Number.isFinite(Number(done?.elapsedSec))
@@ -464,7 +576,7 @@ function drawSummary({ built, images, elapsedSec, model, modelKey, vramMode, col
 
 // ── draw_status ────────────────────────────────────────────────────────
 
-function registerDrawStatus(ctx, cfg, engine) {
+function registerDrawStatus(ctx, cfg, engine, runtime) {
   return ctx.effect(() =>
     ctx.tools.register({
       name: 'draw_status',
@@ -476,7 +588,7 @@ function registerDrawStatus(ctx, cfg, engine) {
       output: JSON_OUTPUT,
       async execute() {
         try {
-          return await buildStatusPayload(cfg, engine, 5)
+          return await buildStatusPayload(cfg, engine, 5, runtime)
         } catch (error) {
           return failure(error)
         }
@@ -485,7 +597,7 @@ function registerDrawStatus(ctx, cfg, engine) {
   )
 }
 
-async function buildStatusPayload(cfg, engine, recentLimit) {
+async function buildStatusPayload(cfg, engine, recentLimit, runtime) {
   let workerStatus
   let statusError = null
   try {
@@ -499,6 +611,20 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   const recent = safeListRecent(cfg.dataDir, recentLimit)
   const bridge = readBridgeState(cfg.bridgeDir)
   const gpu = workerStatus?.worker?.gpu ?? null
+  const pause = runtime?.paused?.read?.() ?? { paused: false, updatedAt: 0, updatedBy: '' }
+  const queue = runtime?.gpu ? await runtime.gpu.snapshot() : { ok: false }
+  const inFlight = runtime?.activity?.list?.() ?? []
+  let cooldowns = []
+  try {
+    const windowMs = Number(cfg.drawCooldownMinutes) > 0 ? Number(cfg.drawCooldownMinutes) * 60_000 : 0
+    cooldowns = listCooldowns({
+      file: path.join(cfg.dataDir, 'state', 'draw-cooldown.json'),
+      windowMs,
+      max: cfg.drawCooldownMax,
+    })
+  } catch {
+    cooldowns = []
+  }
   const worker = workerStatus
     ? {
         running: workerStatus.running,
@@ -519,6 +645,8 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   if (!install.pythonExists || !install.workerScriptExists) next.push('先跑 draw_setup action=install 安装引擎（后台约 30-40 分钟）。')
   else if (!install.modelExists) next.push('模型文件缺失：跑 draw_setup action=install 下载模型。')
   else if (setup.running) next.push(`安装正在进行（${setup.phase} ${setup.percent}%），过几分钟再 draw_status 看。`)
+  else if (pause.paused) next.push('画画已被暂停（悬浮球面板上的开关）：draw_image 会直接回 PAUSED，等面板点「继续」再画。')
+  else if (queue?.ok === false) next.push(`GPU 队列不可达（${queue.error?.message || 'dsh-gpu-queue 没开'}）：draw_image 会回 QUEUE_UNAVAILABLE，先确认队列插件在跑。`)
   else if (workerStatus?.cooldownMsLeft > 0) next.push('引擎连续崩溃冷却中：等 1 分钟再看 data/state/worker.log 找原因。')
   else if (!workerStatus?.running) next.push('引擎空闲未启动，第一次 draw_image 会自动加载模型（约 30-60 秒）。')
   const nsfwReady = Boolean(cfg.nsfwModelPath) && fs.existsSync(cfg.nsfwModelPath)
@@ -533,7 +661,7 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   const workerLogTail = tailFile(path.join(cfg.dataDir, 'state', 'worker.log'), 6)
   const setupLogTail = tailFile(path.join(cfg.dataDir, 'state', 'setup.log'), 4)
 
-  const summary = statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg })
+  const summary = statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg, pause, queue, inFlight })
   return {
     ok: true,
     installed: install.ok,
@@ -573,6 +701,28 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
     },
     gpu,
     worker,
+    paused: {
+      paused: pause.paused,
+      updatedAt: pause.updatedAt,
+      updatedBy: pause.updatedBy,
+      stateFile: runtime?.paused?.file ?? null,
+    },
+    control: {
+      enabled: cfg.controlPort > 0,
+      url: cfg.controlPort > 0 ? `http://127.0.0.1:${cfg.controlPort}` : null,
+      tokenFile: cfg.controlPort > 0 ? path.join(cfg.servicesDir, 'fish-paint.token') : null,
+    },
+    gpuQueue: {
+      url: cfg.gpuQueueUrl,
+      waitMinutes: cfg.gpuQueueWaitMinutes,
+      ok: queue?.ok !== false,
+      holder: queue?.holder ?? null,
+      queue: Array.isArray(queue?.queue) ? queue.queue : [],
+      recent: Array.isArray(queue?.recent) ? queue.recent : [],
+      error: queue?.ok === false ? queue.error ?? null : null,
+    },
+    inFlight,
+    cooldowns,
     setup,
     recent,
     bridge,
@@ -584,11 +734,12 @@ async function buildStatusPayload(cfg, engine, recentLimit) {
   }
 }
 
-function statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg }) {
+function statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg, pause, queue, inFlight }) {
   const parts = []
   parts.push(install.ok ? '引擎已安装' : `引擎未安装（缺 ${install.missing.length} 项）`)
   const nsfwReady = Boolean(cfg?.nsfwModelPath) && fs.existsSync(cfg.nsfwModelPath)
   parts.push(nsfwReady ? '模型：Illustrious + WAI-NSFW' : '模型：Illustrious（NSFW 模型未下载）')
+  if (pause?.paused) parts.push('画画已暂停（不接新点图）')
   if (setup.running) parts.push(`安装进行中：${setup.phase} ${setup.percent}%`)
   else if (setup.present && setup.phase === 'done') parts.push('安装已完成')
   if (workerStatus?.running) {
@@ -599,13 +750,15 @@ function statusSummary({ install, setup, workerStatus, gpu, recent, bridge, cfg 
   }
   if (workerStatus?.cooldownMsLeft > 0) parts.push(`冷却中还剩约 ${Math.ceil(workerStatus.cooldownMsLeft / 1000)} 秒`)
   parts.push(`最近生成 ${recent.length} 张`)
+  if (queue?.ok === false) parts.push('GPU 队列不可达（画画会回 QUEUE_UNAVAILABLE）')
+  else if (queue?.holder) parts.push(`GPU 正被占用：${queue.holder.kind === 'sing' ? '唱歌' : '画画'}${inFlight?.length ? `（在飞 ${inFlight.length} 张）` : ''}`)
   parts.push(bridge.ok ? `QQ 桥可用（${bridge.kind}，R18 名单 ${bridge.r18Count} 个）` : `QQ 桥不可用：${bridge.error}`)
   return `${parts.join('；')}。`
 }
 
 // ── draw_setup ─────────────────────────────────────────────────────────
 
-function registerDrawSetup(ctx, cfg, engine) {
+function registerDrawSetup(ctx, cfg, engine, runtime) {
   return ctx.effect(() =>
     ctx.tools.register({
       name: 'draw_setup',
@@ -629,7 +782,7 @@ function registerDrawSetup(ctx, cfg, engine) {
       async execute(args = {}) {
         const action = String(args.action || 'status')
         if (action === 'install') return startInstall(cfg)
-        if (action === 'verify') return verifyEngine(cfg, engine)
+        if (action === 'verify') return verifyEngine(cfg, engine, runtime)
         if (action === 'status') return setupStatus(cfg, engine)
         return failure({ code: 'BAD_REQUEST', message: 'action 只能是 status / install / verify' })
       },
@@ -716,13 +869,16 @@ function startInstall(cfg) {
   }
 }
 
-async function verifyEngine(cfg, engine) {
+async function verifyEngine(cfg, engine, runtime) {
   const install = engine.installState()
   if (!install.ok) {
     return failure({ code: 'NOT_INSTALLED', message: install.message })
   }
   const smokePrompt = '1girl, solo, masterpiece'
+  // 冒烟图是诊断用的：不受「暂停接新单」影响，但一样要排队拿 GPU 令牌。
+  let ticket = null
   try {
+    ticket = await runtime.gpu.acquire({ kind: 'draw', label: 'draw_setup verify', waitMs: Math.min(cfg.gpuQueueWaitMinutes, 5) * 60_000 })
     const outDir = todayDir(cfg.dataDir)
     const done = await engine.generate({
       prompt: smokePrompt,
@@ -767,7 +923,9 @@ async function verifyEngine(cfg, engine) {
       summary: `冒烟图生成成功：${record.path}（seed ${record.seed}，耗时 ${done.elapsedSec}s${Number(done.loadSec) > 0 ? `，加载模型 ${done.loadSec}s` : ''}）。引擎可用。`,
     }
   } catch (error) {
-    return failure(error, { summaryPrefix: '冒烟图生成失败' })
+    return failure(mapAbortError(error, runtime), { summaryPrefix: '冒烟图生成失败' })
+  } finally {
+    if (ticket) await ticket.release()
   }
 }
 
@@ -916,9 +1074,19 @@ function failure(error, extra = {}) {
         ? '显存不够：降低尺寸（portrait 或更小）或 steps 后重试。'
         : code === 'COOLDOWN'
           ? '引擎连续崩溃进入冷却，等约 1 分钟；反复崩溃看 data/state/worker.log。'
-          : code === 'BAD_REQUEST'
-            ? ''
-            : '可以先 draw_status 看引擎状态。'
+          : code === 'PAUSED'
+            ? '画画暂停是悬浮球上的开关，别换工具绕过：等恢复（或让人在面板上点「继续」）再说。'
+            : code === 'ABORTED'
+              ? '这是人为中止，不是引擎坏了；要接着画再调一次就行。'
+              : code === 'QUEUE_UNAVAILABLE'
+                ? 'GPU 队列服务（dsh-gpu-queue，31879）连不上：先确认它开着，再重试。'
+                : code === 'QUEUE_TIMEOUT'
+                  ? '排队太久（唱歌/别的图占着卡）：过一会儿再点，或者问问面板上的队列。'
+                  : code === 'QUEUE_CANCELLED'
+                    ? '这次排队被面板撤掉了；想画就再点一次。'
+                    : code === 'BAD_REQUEST'
+                      ? ''
+                      : '可以先 draw_status 看引擎状态。'
   const prefix = extra.summaryPrefix ? `${extra.summaryPrefix}：` : '画图失败'
   return {
     ok: false,
@@ -1027,6 +1195,9 @@ function systemPromptText(cfg) {
     '',
     '**7. 失败时**',
     '- 先看返回的 error.code：NOT_INSTALLED / MODEL_MISSING → 让用户跑 draw_setup action=install；OOM → 降尺寸或 steps；COOLDOWN → 等冷却。',
+    '- PAUSED = 画画被悬浮球面板暂停了（全局开关，主会话也一样拦）；照实说「画画暂停中」，别换别的工具硬画、也别假装画了。',
+    '- QUEUE_UNAVAILABLE / QUEUE_TIMEOUT / QUEUE_CANCELLED = 和唱歌共用的 GPU 队列那边的事：队列没启动、排太久、或被人从面板撤了——照实转述，别自己重试到死。',
+    '- ABORTED = 有人在面板上按了「中止」，不是引擎坏了；用户要的话再调一次 draw_image 就行。',
     '- draw_status 看安装/worker/显存/最近错误/下一步；draw_setup action=verify 能跑一张 512² 冒烟图确认引擎可用；draw_recent 回看最近生成的图（按日期/target 过滤）。',
     `日志在 ${path.join(cfg.dataDir, 'state', 'worker.log')} 与 ${path.join(cfg.dataDir, 'state', 'setup.log')}。`,
     '',

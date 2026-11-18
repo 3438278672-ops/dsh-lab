@@ -32,7 +32,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/activity.test.mjs test/control.test.mjs test/engine.test.mjs test/gpu.test.mjs test/index.test.mjs test/pause.test.mjs test/presets.test.mjs test/qq.test.mjs test/ratelimit.test.mjs test/store.test.mjs"
   },
   "dsh": {
     "bundle": {

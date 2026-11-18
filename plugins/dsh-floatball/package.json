@@ -1,0 +1,35 @@
+{
+  "name": "dsh-floatball",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "桌面悬浮球（自研）：点歌与画画的一体化监视/控制面板",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "helper",
+    "tools",
+    "cordis.patch.yml",
+    "README.md",
+    "icon.svg",
+    "locale"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/format.test.mjs test/position.test.mjs test/runtime.test.mjs test/supervisor.test.mjs test/snapshot.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

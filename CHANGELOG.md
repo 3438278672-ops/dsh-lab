@@ -6,6 +6,63 @@
 
 ---
 
+## 2026-11-19
+
+### dsh-gpu-queue `0.1.0`（新插件）
+
+- 新增：一块 8G 显存给画画、唱歌、语音合成共用。以前三边各跑各的——SDXL worker 常驻占着约 5GB，
+  唱歌的 UVR5 / RVC 再上去就是 `memory.used 7428 / 8192 MiB`，谁的进程被驱动踢掉全看运气。
+- 形态是**本机令牌服务**（`127.0.0.1:31879`，单通道 FIFO）：`POST /gpu/acquire` 领牌、`GET /gpu/ticket` 排队轮询、
+  `POST /gpu/heartbeat` 续命、`POST /gpu/release` 交回、`POST /gpu/cancel` 撤掉自己的排队项、`GET /gpu/state` 看现场。
+  写端点要 `~/.dsh/dsh-services/gpu-queue.token`，读端点只读。
+- 语义拍板：唱歌只在**真正吃显存的翻唱段**占队（找歌、发送不占）；发唱歌牌之前先
+  `POST /paint/yield` 让画画的 worker 把显存吐出来（等 20 秒，失败也照发、只记 `yieldWarning`）；
+  语音合成插队但不抢占持有者；持有者 60 秒没心跳或进程死了回收，排队项 90 秒不轮询丢弃。
+- 两个坑记在案：`pump` 写成 `pumping = (async () => {…})()` 时，函数体同步跑完会让 `finally` 抢在赋值前执行，
+  之后所有 pump 永久空转（改成先存 `task`、`finally` 里比对再清）；`grant` 早期不检查现有持有者，会把别人的牌顶掉。
+- 测试：17 个（9 个纯状态机 + 8 个 HTTP 行为），另有 `tools/e2e-python.mjs` 真跑一遍「唱歌 → 画画 → 语音」串行。
+
+### dsh-floatball `0.1.0`（新插件）
+
+- 新增：桌面右下角一颗鲸鱼球。点开是控制台——点歌（在唱进度、排单、暂停接新单、掐掉这首、CD 与白名单）、
+  画画（接单状态、worker、在飞的那张、暂停接新图、中止）、顶部一条显卡队列。以前这些只能让智能体去调工具，
+  现在人自己伸手就能按。
+- 球是自带 Electron 运行时的小窗（`%LOCALAPPDATA%\dsh-floatball\runtime\44.0.0`，首启从 npmmirror 下载、GitHub 兜底）：
+  透明置顶、`setIgnoreMouseEvents` 穿透、拖动按光标跟手、位置落盘、父进程（DSH）没了自动退。
+- 两个 Electron 坑值得单独记：① DSH 环境里继承着 `ELECTRON_RUN_AS_NODE=1`，不剔掉 electron.exe 会以 Node 模式启动，
+  报 `Cannot find module 'electron'`；② **Chromium 不接受含中文的 exe 路径**——放在 `D:\新建文件夹\…` 下启动直接
+  `STATUS_BREAKPOINT`（`code=-2147483645`），一行脚本都跑不到。所以运行时固定装到 ASCII 路径，旧位置存在时自动复制复用。
+- 窗口坐标也踩了混合 DPI（主屏 1.0 / 副屏 1.5）：同一组数字换块屏就是另一个物理点，曾经把球丢进两块屏之间的死区。
+  现在启动/接显示器都过一遍 `resolvePosition`（不在任何屏上就回主屏右下角），拖动改由主进程读光标、只夹所有屏的外接矩形。
+- 测试：32 个（格式化、运行时安装、看护进程、快照、位置解析），另有 `tools/e2e-ui.mjs` 用 CDP 真点一遍面板（14 项）。
+
+### dsh-fish-paint
+
+- 新增：`lib/control.js` 控制口（`127.0.0.1:31878`，写端点要 `x-control-token`）：`GET /paint.json` 快照
+  （暂停、限流、worker、在飞、队列、冷却名单）、`POST /paint/pause`、`POST /paint/yield`（有在画的就 409）、
+  `POST /paint/abort`。桌面那颗球就是靠这几个端点干活。
+- 新增：**全局暂停**（`data/state/paint-paused.json`）。暂停只拦新点图，在画的照常画完；主会话也拦，没有旁路。
+- 新增：每张图先领 `draw` 令牌（最多等 10 分钟，超时回 `QUEUE_TIMEOUT`），画完在 `finally` 里释放；
+  面板中止会把在飞的那张映射成 `ABORTED`，冷却自动退回。
+- 修：`draw_setup action=verify` 的冒烟图不受暂停影响（诊断用），但同样排队。
+
+### dsh-qq-sing
+
+- 新增：`POST /qqsing/cancel?alsoQueue=0|1`（只认令牌），把「掐掉当前这首」从工具里抽成 `cancelCurrent()`，
+  工具与球共用一套；没在唱时回 `{cancelled:false}` 而不是报错，`jobId` 对不上回 409。
+- 新增：`/qqsing.json` 补 `limits`（CD 时长、排单上限、白名单 / VIP 计数）与 `cooldowns`（还要等多久），
+  球上不用再猜。
+- 新增：`python/gpuqueue.py`（纯标准库客户端）替掉 `gpu_lock("rvc")`，UVR5 分离与 RVC 转换共用一个唱歌令牌；
+  队列不可用时**打日志照唱**（队列挂了画画那边会明确失败，不会同时吃卡）。
+- 修：`server.on('error')` 不再吞 `EADDRINUSE`，写进 `<name>.status.json`，球能分清「没开」和「端口被占」。
+
+### dsh-qq-voice
+
+- 新增：`gpu-token.mjs`——真正合成前领一个 `voice` 令牌（30 秒），显卡正被画图占着就回一句
+  「等它画完再念」；队列不可达时照念（不让「没装队列插件」变成「发不了语音」）。
+
+---
+
 ## 2026-11-18
 
 ### dsh-llm-refusal-fix `0.1.0`（新插件）

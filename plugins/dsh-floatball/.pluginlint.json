@@ -1,0 +1,14 @@
+{
+  "waivers": [
+    {
+      "file": "helper/main.cjs",
+      "rules": ["DEP002"],
+      "reason": "electron 由 Electron 运行时注入，不是 npm 依赖；只有 helper 里的 CJS 主进程会 require 它"
+    },
+    {
+      "file": "helper/preload.cjs",
+      "rules": ["DEP002"],
+      "reason": "同上：preload 在 Electron 渲染进程里跑，electron 模块由运行时提供"
+    }
+  ]
+}
