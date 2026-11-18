@@ -22,11 +22,12 @@
 | [dsh-qq-archive](plugins/dsh-qq-archive) | 把群聊历史落成本地索引：全文搜、群友档案、群聊日报/周报/月报、@ 关系看板、自然语言问答、活跃日历、链接资源库、群梗考古、名场面、活跃榜、日报主动推送、给 QQ 桥的熟人卡 | SQLite + 分词/单字倒排、只读源库、单文件看板、在线查询 API、headless 截图 |
 | [dsh-idea-log](plugins/dsh-idea-log) | 干活时随手记插件点子 / 踩坑 / 改进点，每天半夜自动从会话里提炼，侧栏一面墙，点「开工」直接开新对话 | 多帧 zstd 解压、模型提炼去重、postMessage + `uiWorkspace.startSession` |
 | [dsh-fish-paint](plugins/dsh-fish-paint) | 一句自然语言 → 本机 SDXL 出二次元插画 / 表情包（点名角色先查 P 站对齐设定），落盘存元数据，要的话直接发 QQ | diffusers 常驻 worker、双模型（Illustrious-XL-v2.0 / WAI-NSFW）、rating sidecar 硬闸、一人 1 小时限流（VIP 不限）、qq-bridge 投递 |
-| [dsh-llm-refusal-fix](plugins/dsh-llm-refusal-fix) | 把 Messages 的合法终止原因（`refusal` / `pause_turn` / 上下文超限）从「协议错误」里救回来：模型拒答时回合正常结束并带一条可读说明，不再是 `unsupported stop reason` 的报错回合、也不会让 QQ 桥把错误原文贴进群 | vendor 修补 adapter、provider 路由同名接管（`deepseek-account`）、9 个离线 fixture + CI |
 | [mcp/pixiv-duty](mcp/pixiv-duty) | Pixiv App API 的 MCP：搜索 / 详情 / 下载 / 小说分段 / 校验 | pixivpy、FastMCP |
 | [mcp/bili-duty](mcp/bili-duty) | B 站 MCP 的加固分支：30 个工具，登录 / 搜索 / 评论 / 字幕 / 私信 / 投稿 | bilibili-api-python |
 
-十一个项目、53 个测试文件（44 个 `*.test.mjs` + 2 个 python 测试 + 5 个测试辅助脚本 + 2 个 fixture 脚本）。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
+十一个项目、51 个测试文件（44 个 `*.test.mjs` + 2 个 python 测试 + 5 个测试辅助脚本）。**仓库里没有任何账号凭证**（token / cookie / 密码一律走运行目录里的 `credential.json`，已被 `.gitignore` 排除）；模型权重、venv、出图产物也不入库（`**/data/`）。
+
+> `dsh-llm-refusal-fix`（拒答 / 终止原因补丁）已迁移到独立仓库：<https://github.com/3438278672-ops/dsh-llm-refusal-fix>，本仓库不再保留副本。
 
 ---
 
@@ -196,8 +197,7 @@ dsh-lab/
 │  ├─ dsh-adb-phone/      # adb 手机控制
 │  ├─ dsh-qq-archive/     # 群聊档案馆（搜索内核 + 档案 + 日报/周报 + 看板 + 问答/日历/资源库 + 熟人卡）
 │  ├─ dsh-idea-log/       # 灵感账本（随手记 + 每日提炼 + 灵感墙 + 一键开工）
-│  ├─ dsh-fish-paint/     # 鱼鱼画画（diffusers 常驻 worker + 出图落盘 + QQ 投递）
-│  └─ dsh-llm-refusal-fix/ # 拒答 / 终止原因补丁（vendor 修补 adapter + provider 接管 + fixture 测试）
+│  └─ dsh-fish-paint/     # 鱼鱼画画（diffusers 常驻 worker + 出图落盘 + QQ 投递）
 └─ mcp/
    ├─ pixiv-duty/         # Pixiv MCP（px_* 7 个工具）
    └─ bili-duty/          # B 站 MCP（bili_* 30 个工具）

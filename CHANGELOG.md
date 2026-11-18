@@ -10,6 +10,9 @@
 
 ### dsh-llm-refusal-fix `0.1.0`（新插件）
 
+> 2026-11-18 起该插件已迁移到独立仓库 <https://github.com/3438278672-ops/dsh-llm-refusal-fix>，
+> 本仓库不再保留副本；以下记录保留为迁移前在 dsh-lab 里的首次发布。
+
 - 新增：把 DeepSeek Messages 的合法终止原因从 `MALFORMED_RESPONSE` 里救回来。`stop_reason: "refusal"`
   （模型内容安全拒答）此前被适配器的 `stopReason()` 当作协议损坏，agent 回合直接变成 error；
   QQ 桥随后把 `DeepSeek Messages stream: unsupported stop reason refusal` 原样贴进群。
@@ -20,8 +23,8 @@
   `llm-deepseek-account` 并由本包同名接管（`settingsNs: llm-deepseek-account`，账号 / 模型 / 既有设置全沿用）。
 - 测试：9 个离线 fixture（`npm test`，依赖装在 `tests/.work/`，不在插件根目录留 `node_modules`）
   + 装好后的 `llm_refusal_fix_selftest` 真机冒烟 7/7；真机核验内置行 `inactive`、本包行活跃、正常对话可用。
-  环境、真机核验与上游原始 SSE 证据见 [plugins/dsh-llm-refusal-fix/TESTING.md](plugins/dsh-llm-refusal-fix/TESTING.md)；
-  新增 CI workflow `.github/workflows/dsh-llm-refusal-fix.yml` 跑同一套 fixture。
+  环境、真机核验与上游原始 SSE 证据见独立仓库的 [TESTING.md](https://github.com/3438278672-ops/dsh-llm-refusal-fix/blob/main/TESTING.md)；
+  同一套 fixture 由独立仓库的 CI workflow `.github/workflows/test.yml` 跑。
 - 上游讨论 #11337 / #13611；0.2.2-rc.4 只把错误码改成 `CONTENT_REFUSED`、可恢复性仍未修，上游修好后本包可卸载。
 
 ### 仓库
