@@ -1,0 +1,25 @@
+name: dsh-llm-refusal-fix tests
+
+on:
+  push:
+    paths:
+      - 'plugins/dsh-llm-refusal-fix/**'
+      - '.github/workflows/dsh-llm-refusal-fix.yml'
+  pull_request:
+    paths:
+      - 'plugins/dsh-llm-refusal-fix/**'
+  workflow_dispatch:
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/dsh-llm-refusal-fix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Offline fixture suite
+        run: npm test

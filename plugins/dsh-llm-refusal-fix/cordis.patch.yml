@@ -1,0 +1,19 @@
+# dsh-llm-refusal-fix — takeover form (Phase B)
+#
+# 1) Disable the built-in deepseek-account provider row (its Messages adapter
+#    treats the legal stop_reason=refusal as MALFORMED_RESPONSE, so a whole
+#    turn fails).
+# 2) Insert this bundle's own row: same deepseek-account route and the same
+#    llm-deepseek-account settings namespace, but with the corrected
+#    finish-reason contract:
+#      end_turn / stop_sequence / pause_turn / cancelled -> stop
+#      tool_use -> tool-calls
+#      max_tokens / model_context_window_exceeded -> max-tokens
+#      refusal -> normal stop + one readable notice (not a protocol error)
+#      anything unknown still MALFORMED_RESPONSE (no hiding real wire damage)
+- id: llm-deepseek-account
+  disabled: true
+- insert:
+    - id: llm-deepseek-account-fix
+      name: dsh-llm-refusal-fix
+      config: {}

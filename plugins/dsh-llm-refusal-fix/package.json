@@ -1,0 +1,56 @@
+{
+  "name": "dsh-llm-refusal-fix",
+  "version": "0.1.0",
+  "description": "Patch for the DeepSeek Messages adapter: treat legal stop_reason values (refusal / pause_turn / model_context_window_exceeded) as terminal turn states instead of MALFORMED_RESPONSE, and surface a readable refusal notice.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./lib/adapter.js": "./lib/adapter.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "TESTING.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node tests/run.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cosmokit": ">=1.9.0 <2.0.0",
+    "@deepseek-ai/dsh-anonymous-user-id": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-atomic-write": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-attachment": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-home-paths": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-launch-environment": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-timeout": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-util-values": ">=0.2.2-rc.3 <0.3.0-0",
+    "@deepseek-ai/schemastery": ">=3.19.0 <4.0.0",
+    "eventsource-parser": ">=3.1.1 <4.0.0",
+    "semver": ">=7.8.0 <8.0.0"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "bundle",
+    "llm",
+    "refusal",
+    "stop-reason"
+  ],
+  "license": "MIT"
+}

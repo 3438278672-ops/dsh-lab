@@ -8,6 +8,22 @@
 
 ## 2026-11-18
 
+### dsh-llm-refusal-fix `0.1.0`（新插件）
+
+- 新增：把 DeepSeek Messages 的合法终止原因从 `MALFORMED_RESPONSE` 里救回来。`stop_reason: "refusal"`
+  （模型内容安全拒答）此前被适配器的 `stopReason()` 当作协议损坏，agent 回合直接变成 error；
+  QQ 桥随后把 `DeepSeek Messages stream: unsupported stop reason refusal` 原样贴进群。
+- 修法是补契约而不是特判：`refusal` → 正常结束 + 一条可读说明文本块（同时避免 `EMPTY_RESPONSE`）；
+  `pause_turn` / `cancelled` → 正常结束；`model_context_window_exceeded` → `max-tokens`；
+  未知值仍然 `MALFORMED_RESPONSE`（不放宽真损坏）。
+- 落地为 profile 级 bundle：vendor 修补版 adapter + account provider，patch 行禁用内置
+  `llm-deepseek-account` 并由本包同名接管（`settingsNs: llm-deepseek-account`，账号 / 模型 / 既有设置全沿用）。
+- 测试：9 个离线 fixture（`npm test`，依赖装在 `tests/.work/`，不在插件根目录留 `node_modules`）
+  + 装好后的 `llm_refusal_fix_selftest` 真机冒烟 7/7；真机核验内置行 `inactive`、本包行活跃、正常对话可用。
+  环境、真机核验与上游原始 SSE 证据见 [plugins/dsh-llm-refusal-fix/TESTING.md](plugins/dsh-llm-refusal-fix/TESTING.md)；
+  新增 CI workflow `.github/workflows/dsh-llm-refusal-fix.yml` 跑同一套 fixture。
+- 上游讨论 #11337 / #13611；0.2.2-rc.4 只把错误码改成 `CONTENT_REFUSED`、可恢复性仍未修，上游修好后本包可卸载。
+
 ### 仓库
 
 - 新增根目录 `.gitattributes`：文本**存 LF、检出 LF**，`png / jpg / db / safetensors` 等按二进制处理。
